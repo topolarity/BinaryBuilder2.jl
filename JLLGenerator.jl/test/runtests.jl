@@ -408,6 +408,74 @@ end
     @test_throws ArgumentError make_on_load_callback(true)
 end
 
+using UUIDs: UUIDs
+using JLLGenerator: uuid5
+@testset "uuid5" begin
+    # RFC 4122 version-5 test vector: uuid5(NAMESPACE_DNS, "python.org")
+    ns_dns = Base.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+    u = uuid5(ns_dns, "python.org")
+    @test u == Base.UUID("886313e1-3b8a-5372-9b90-0c9aee199e5d")
+
+    # Agrees with the stdlib implementation, unlike `jll_specific_uuid5()`
+    key = "libzstd"
+    @test uuid5(ns_dns, key) == UUIDs.uuid5(ns_dns, key)
+    @test JLLGenerator.jll_specific_uuid5(ns_dns, key) != UUIDs.uuid5(ns_dns, key)
+
+    # Version and variant fields are properly set
+    @test UUIDs.uuid_version(uuid5(ns_dns, key)) == 5
+end
+
+@testset "Library identity (dlid)" begin
+    # `dlid` defaults to `nothing` on a standalone product, and is
+    # then omitted from the TOML dict
+    lp = JLLLibraryProduct(:libzstd, "lib/libzstd.so.1", [])
+    @test lp.dlid === nothing
+    @test !haskey(generate_toml_dict(lp), "dlid")
+    @test parse_toml_dict(JLLLibraryProduct, generate_toml_dict(lp)) == lp
+
+    # An explicit `dlid` roundtrips through the TOML dict
+    dlid = Base.UUID("d91c531c-5cb2-4b4c-b32b-3f7ad0f81f0f")
+    lp = JLLLibraryProduct(:libzstd, "lib/libzstd.so.1", []; dlid)
+    d = generate_toml_dict(lp)
+    @test d["dlid"] == string(dlid)
+    @test parse_toml_dict(JLLLibraryProduct, d) == lp
+
+    # Assembling a `JLLInfo` fills in `uuid5(pkg_uuid, string(varname))` for
+    # any library product that does not declare a `dlid`
+    function make_zlib_jll(products)
+        return JLLInfo(;
+            name = "Zlib",
+            version = v"1.2.13+1",
+            builds = [
+                JLLBuildInfo(;
+                    src_version = v"1.2.13+1",
+                    platform = Platform("aarch64", "linux"; libc = "glibc"),
+                    name = "Zlib",
+                    artifact = JLLArtifactBinding(
+                        treehash = "0c6c284985577758b3a339c6215c9d4e3d71420e",
+                        download_sources = [],
+                    ),
+                    products,
+                    licenses = [mit_license],
+                ),
+            ],
+        )
+    end
+
+    jll = make_zlib_jll([JLLLibraryProduct(:libz, "lib/libz.so.1", [])])
+    libz = only(only(jll.builds).products)
+    @test libz.dlid == uuid5(Base.UUID(jll), "libz")
+
+    # The populated `dlid` survives the round-trip through TOML
+    d, new_jll = roundtrip_jll_through_toml(jll)
+    @test only(only(d["builds"])["products"])["dlid"] == string(libz.dlid)
+    @test new_jll == jll
+
+    # An explicitly-declared `dlid` is not overwritten
+    jll = make_zlib_jll([JLLLibraryProduct(:libz, "lib/libz.so.1", []; dlid)])
+    @test only(only(jll.builds).products).dlid == dlid
+end
+
 # Test that we can generate all of the stdlib JLLs in `contrib/`
 @testset "stdlib JLL generation" begin
     include(joinpath(dirname(@__DIR__), "contrib", "gen_julia_jlls.jl"))

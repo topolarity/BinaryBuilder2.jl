@@ -35,6 +35,42 @@ function only_foreign_platforms(jllinfo, host = HostPlatform())
     return jllinfo
 end
 
+@testset "LazyLibrary identity expression" begin
+    product = Dict{String,Any}(
+        "name" => "libzstd",
+        "path" => "lib/libzstd.so.1",
+        "soname" => "libzstd.so.1",
+        "deps" => [],
+        "flags" => ["RTLD_LAZY"],
+        "dlid" => "c19c4d38-397d-5f70-a4e5-9d0a4213b93b",
+    )
+
+    function lazylib_kwargs(ex)
+        @test Meta.isexpr(ex, :call) && ex.args[1] == :LazyLibrary
+        return Dict(kw.args[1] => kw.args[2] for kw in ex.args[2:end] if Meta.isexpr(kw, :kw))
+    end
+
+    # Without identity support (`hasfield(LazyLibrary, :id)` is false),
+    # no `id` kwarg is emitted, keeping older Julias happy
+    ex = LazyJLLWrappers.lazy_library_expr(:path_var, :(deps), :(flags), product, false)
+    kws = lazylib_kwargs(ex)
+    @test haskey(kws, :dependencies) && haskey(kws, :flags)
+    @test !haskey(kws, :id)
+
+    # With identity support, the `id` kwarg is emitted
+    ex = LazyJLLWrappers.lazy_library_expr(:path_var, :(deps), :(flags), product, true)
+    kws = lazylib_kwargs(ex)
+    @test haskey(kws, :dependencies) && haskey(kws, :flags)
+    @test kws[:id] == Base.UUID("c19c4d38-397d-5f70-a4e5-9d0a4213b93b")
+
+    # A product without a `dlid` gets no `id` kwarg
+    no_dlid_product = delete!(copy(product), "dlid")
+    ex = LazyJLLWrappers.lazy_library_expr(:path_var, :(deps), :(flags), no_dlid_product, true)
+    kws = lazylib_kwargs(ex)
+    @test haskey(kws, :dependencies) && haskey(kws, :flags)
+    @test !haskey(kws, :id)
+end
+
 example_jllinfos_path = joinpath(@__DIR__, "..", "..", "JLLGenerator.jl", "contrib", "example_jllinfos")
 @testset "JLL loading tests" begin
     # HelloWorldC_jll has `ExecutableProduct`s

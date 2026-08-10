@@ -107,15 +107,19 @@ end
     soname::String
     flags::Vector{Symbol}
     on_load_callback::Union{Nothing,Symbol}
+    # Stable library identity, typically `uuid5(pkg_uuid, string(varname))`;
+    # filled in automatically when assembling a `JLLInfo` if left as `nothing`.
+    dlid::Union{Nothing,UUID}
 
     function JLLLibraryProduct(varname, path, deps;
                                flags = rtld_symbols(default_rtld_flags),
                                soname = basename(path),
-                               on_load_callback = nothing)
+                               on_load_callback = nothing,
+                               dlid = nothing)
         if isa(flags, UInt32)
             flags = rtld_symbols(flags)
         end
-        return new(varname, path, deps, soname, flags, on_load_callback)
+        return new(varname, path, deps, soname, flags, on_load_callback, dlid)
     end
 end
 
@@ -131,12 +135,19 @@ function generate_toml_dict(lp::JLLLibraryProduct)
     if lp.on_load_callback !== nothing
         d["on_load_callback"] = string(lp.on_load_callback)
     end
+    if lp.dlid !== nothing
+        d["dlid"] = string(lp.dlid)
+    end
     return d
 end
 function parse_toml_dict(::Type{JLLLibraryProduct}, d)
     on_load_callback = nothing
     if haskey(d, "on_load_callback")
         on_load_callback = Symbol(d["on_load_callback"])
+    end
+    dlid = nothing
+    if haskey(d, "dlid")
+        dlid = UUID(d["dlid"])
     end
     return JLLLibraryProduct(
         Symbol(d["name"]),
@@ -145,6 +156,7 @@ function parse_toml_dict(::Type{JLLLibraryProduct}, d)
         soname = d["soname"],
         flags = Symbol.(d["flags"]),
         on_load_callback,
+        dlid,
     )
 end
 
@@ -511,10 +523,37 @@ function guess_julia_compat(artifacts)
 end
 
 """
+    populate_dlids(build::JLLBuildInfo, pkg_uuid::UUID)
+
+Return a `JLLBuildInfo` where every library product declares a stable library
+identity (`dlid`).  Products that do not already declare one are assigned
+`uuid5(pkg_uuid, string(varname))`, namespacing the identity under the JLL
+package's UUID so that it is stable across rebuilds and versions of the JLL.
+"""
+function populate_dlids(build::JLLBuildInfo, pkg_uuid::UUID)
+    if all(!isa(p, JLLLibraryProduct) || p.dlid !== nothing for p in build.products)
+        return build
+    end
+    products = map(build.products) do p
+        if isa(p, JLLLibraryProduct) && p.dlid === nothing
+            p = JLLLibraryProduct(p.varname, p.path, p.deps;
+                                  soname = p.soname,
+                                  flags = p.flags,
+                                  on_load_callback = p.on_load_callback,
+                                  dlid = uuid5(pkg_uuid, string(p.varname)))
+        end
+        return p
+    end
+    return JLLBuildInfo(build.src_version, build.platform, build.name, build.artifact,
+                        build.auxilliary_artifacts, products, build.deps, build.sources,
+                        build.licenses, build.lazy, build.callback_defs, build.init_def)
+end
+
+"""
     JLLInfo
 
 A structure representing a JLL that is to be generated.  All relevant information on the
-JLL is stored within, including sources 
+JLL is stored within, including sources
 """
 @struct_hash_equal struct JLLInfo
     # Name of the JLL, e.g. `libfoo_jll`
@@ -540,8 +579,13 @@ JLL is stored within, including sources
     julia_compat::String
 
     function JLLInfo(name, version, artifacts, platform_augmentation_code, julia_compat)
+        name = string(name)
+        # Now that the JLL package's UUID is known, fill in stable library
+        # identities for any library products that do not declare one.
+        pkg_uuid = jll_package_uuid(name)
+        artifacts = JLLBuildInfo[populate_dlids(build, pkg_uuid) for build in artifacts]
         return new(
-            string(name),
+            name,
             VersionNumber(version),
             artifacts,
             string(platform_augmentation_code),
@@ -572,10 +616,29 @@ function jll_specific_uuid5(namespace::UUID, key::String)
     u |= 0x00000000000050008000000000000000
     return UUID(u)
 end
+
+"""
+    uuid5(namespace::UUID, key::String)
+
+Compute a standard RFC 4122 version-5 (SHA-1 based) UUID of `key` within
+`namespace`.  Unlike `jll_specific_uuid5()`, this follows the RFC faithfully
+(hashing the namespace UUID in network byte order), matching the output of
+`UUIDs.uuid5()`.  Used to compute stable library identities (`dlid`s).
+"""
+function uuid5(namespace::UUID, key::String)
+    data = [reinterpret(UInt8, [hton(namespace.value)]); codeunits(key)]
+    u = ntoh(reinterpret(UInt128, SHA.sha1(data)[1:16])[1])
+    # Set the version (5) and variant (RFC 4122) fields
+    u &= 0xffffffffffff0fff3fffffffffffffff
+    u |= 0x00000000000050008000000000000000
+    return UUID(u)
+end
+
 const uuid_package = UUID("cfb74b52-ec16-5bb7-a574-95d9e393895e")
 # For even more interesting historical reasons, we append an extra
 # "_jll" to the name of the new package before computing its UUID.
-UUID(info::JLLInfo) = jll_specific_uuid5(uuid_package, "$(info.name)_jll_jll")
+jll_package_uuid(name::AbstractString) = jll_specific_uuid5(uuid_package, "$(name)_jll_jll")
+UUID(info::JLLInfo) = jll_package_uuid(info.name)
 
 
 function generate_toml_dict(info::JLLInfo)

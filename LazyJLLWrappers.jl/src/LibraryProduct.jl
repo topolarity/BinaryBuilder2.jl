@@ -7,6 +7,28 @@ function soname(product)
     end
 end
 
+"""
+    lazy_library_expr(lazy_path_var_name, deps_expr, flags_expr, product, with_identity)
+
+Build the `LazyLibrary(...)` constructor expression for a library product.
+`with_identity` mirrors `hasfield(Libdl.LazyLibrary, :id)`; when set and the
+product declares a stable library identity (`dlid`), we pass it along via the
+`id` keyword argument (supported on Julia v1.13+).  It is taken as an argument
+so that the expression shape is testable on Julia versions whose `LazyLibrary`
+does not have that field.
+"""
+function lazy_library_expr(lazy_path_var_name, deps_expr, flags_expr, product, with_identity::Bool)
+    ex = :(LazyLibrary(
+        $(lazy_path_var_name),
+        dependencies = $(deps_expr),
+        flags = $(flags_expr),
+    ))
+    if with_identity && haskey(product, "dlid")
+        push!(ex.args, Expr(:kw, :id, Base.UUID(product["dlid"])))
+    end
+    return ex
+end
+
 
 function library_product_definition(jb::JLLBlocks, artifact, product)
     # Call `gen_lazy_artifact_path` first to generate our lazy artifact paths
@@ -29,13 +51,14 @@ function library_product_definition(jb::JLLBlocks, artifact, product)
     if isdefined(Libdl, :LazyLibrary)
         # On Julia v1.11+ we can use `LazyLibrary`
         push!(jb.top_level_blocks, emit_typed_global(
-            var_name, LazyLibrary, quote
-                LazyLibrary(
-                    $(lazy_path_var_name),
-                    dependencies = LazyJLLWrappers.filter_non_lazy_libraries([$(mod_dot_name.(product["deps"])...)]),
-                    flags = $(Expr(:call, :|, [Expr(:., :Libdl, QuoteNode(f)) for f in Symbol.(product["flags"])]...)),
-                )
-            end; isconst=true,
+            var_name, LazyLibrary, lazy_library_expr(
+                lazy_path_var_name,
+                :(LazyJLLWrappers.filter_non_lazy_libraries([$(mod_dot_name.(product["deps"])...)])),
+                Expr(:call, :|, [Expr(:., :Libdl, QuoteNode(f)) for f in Symbol.(product["flags"])]...),
+                product,
+                # On Julia v1.13+, `LazyLibrary` can declare a stable identity
+                hasfield(LazyLibrary, :id),
+            ); isconst=true,
         ))
     else
         # Without `LazyLibrary` support, we export a `String`.  On Julia v1.6+ we
