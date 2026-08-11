@@ -87,6 +87,7 @@ include("Compat.jl")
 include("GeneratorUtils.jl")
 include("ExecutableProduct.jl")
 include("FileProduct.jl")
+include("StaticLibraryProduct.jl")
 include("LibraryProduct.jl")
 include("Runtime.jl")
 
@@ -201,6 +202,8 @@ macro generate_jll_from_toml()
             executable_product_definition(jb, build, product)
         elseif product["type"] == "file"
             file_product_definition(jb, build, product)
+        elseif product["type"] == "static_library"
+            static_library_product_definition(jb, build, product)
         else
             throw(ArgumentError("Unknown product type '$(product["type"])'"))
         end
