@@ -49,7 +49,7 @@ end
 
 function JLLLibraryProduct(lp::LibraryProduct, prefix::String; kwargs...)
     # Note that this un-audited conversion can only fill in the location of the static
-    # archive; the dependency structure of both realizations is learned by the auditor.
+    # archive; the dependency structure of both is learned by the auditor.
     static_path = lp.static === nothing ? nothing : locate(lp.static, prefix; kwargs...)
     return JLLLibraryProduct(
         lp.varname,
@@ -135,7 +135,7 @@ function AbstractProduct(ld::JLLLibraryDep; artifact, artifacts, cache)
 end
 function AbstractProduct(lp::JLLLibraryProduct; artifact, artifacts, cache)
     return get!(cache, lp) do
-        # Reconstruct the static realization, if there is one.  The dependency lists
+        # Reconstruct the static library, if there is one.  The dependency lists
         # are given explicitly, as there is nothing left to inherit at this point.
         static = nothing
         if lp.static !== nothing

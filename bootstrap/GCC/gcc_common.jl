@@ -309,7 +309,7 @@ const gcc_static_lib_dir = raw"lib/gcc/${target}/${gcc_version}"
 
 The compiler support libraries that GCC installs alongside the target sysroot.
 `libgfortran` (and `libquadmath`, where it exists) also ship as static archives,
-declared as the subordinate static realization of the corresponding dynamic
+declared as the subordinate static library of the corresponding dynamic
 library so that consumers can link either one.
 
 Note that the archives do not sit next to the shared libraries; see

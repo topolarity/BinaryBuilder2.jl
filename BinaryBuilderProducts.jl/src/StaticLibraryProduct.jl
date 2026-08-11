@@ -11,9 +11,9 @@ A `StaticLibraryProduct` can be used in two ways:
 
 * **Subordinate** (the common case): passed as the `static` keyword argument of a
   [`LibraryProduct`](@ref), declaring that the dynamic library product also has a
-  static realization.  In this case `varname` **must not** be given; the identity of
+  static library.  In this case `varname` **must not** be given; the identity of
   the library is defined by the parent `LibraryProduct`, and the archive is simply
-  another realization of it.
+  another form of the same library.
 
 * **Standalone**: given its own `varname`, for libraries that are only ever shipped
   as an archive.  Standalone products have no dynamic sibling to learn from, so both

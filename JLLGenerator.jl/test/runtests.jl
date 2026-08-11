@@ -426,7 +426,7 @@ using JLLGenerator: uuid5
 end
 
 @testset "Library identity (dlid)" begin
-    # Identity is a property of the library, not of any one build's realization of it,
+    # Identity is a property of the library, not of any one build of it,
     # so it is stated once at the top level and appears nowhere in a build.
     lp = JLLLibraryProduct(:libzstd, "lib/libzstd.so.1", [])
     @test !haskey(generate_toml_dict(lp), "dlid")
@@ -481,8 +481,8 @@ end
                                              products = Dict{Symbol,Base.UUID}())
 end
 
-@testset "Realization groups" begin
-    # A library with both realizations nests each one under its own group
+@testset "Dynamic and static libraries" begin
+    # A library available both ways nests each one under its own table
     lp = JLLLibraryProduct(:libgfortran, "lib/libgfortran.so.5.0.0",
                            [JLLLibraryDep(nothing, :libquadmath)];
                            soname = "libgfortran.so.5",
@@ -490,10 +490,10 @@ end
                            static_deps = [JLLLibraryDep(nothing, :libquadmath)],
                            static_system_deps = ["c", "m"],
                            static_roots = ["ctor"])
-    @test has_dynamic_realization(lp) && has_static_realization(lp)
+    @test has_dynamic_library(lp) && has_static_library(lp)
     d = generate_toml_dict(lp)
     @test d["type"] == "library"
-    # Nothing about a realization leaks to the top level any more
+    # Nothing about either linkage leaks to the top level any more
     @test !any(haskey(d, k) for k in ("path", "soname", "flags", "deps", "static_path"))
     @test d["dynamic"]["path"] == "lib/libgfortran.so.5.0.0"
     @test d["dynamic"]["soname"] == "libgfortran.so.5"
@@ -503,19 +503,19 @@ end
     @test d["static"]["roots"] == ["ctor"]
     @test parse_toml_dict(JLLLibraryProduct, "libgfortran", d) == lp
 
-    # A library with only a shared realization has no `static` group at all
+    # A library that is only ever shared has no `static` table at all
     dyn_only = JLLLibraryProduct(:libz, "lib/libz.so.1", [])
-    @test !has_static_realization(dyn_only)
+    @test !has_static_library(dyn_only)
     @test !haskey(generate_toml_dict(dyn_only), "static")
     @test parse_toml_dict(JLLLibraryProduct, "libz", generate_toml_dict(dyn_only)) == dyn_only
 
     # ... and one with only an archive has no `dynamic` group, which is how a consumer
     # knows that asking to load it is an error rather than an oversight
     static_only = JLLLibraryProduct(:libfoo;
-        static = JLLStaticRealization("lib/libfoo.a";
+        static = JLLStaticLibrary("lib/libfoo.a";
                                       deps = [JLLLibraryDep(nothing, :libz)],
                                       system_deps = ["m"]))
-    @test !has_dynamic_realization(static_only)
+    @test !has_dynamic_library(static_only)
     d2 = generate_toml_dict(static_only)
     @test d2["type"] == "library"
     @test !haskey(d2, "dynamic")
@@ -527,7 +527,7 @@ end
     # Static metadata still needs an archive to hang off of
     @test_throws ArgumentError JLLLibraryProduct(:libz, "lib/libz.so.1", []; static_system_deps=["m"])
 
-    # `library_deps` spans every realization
+    # `library_deps` spans both linkages
     @test library_deps(lp) == [JLLLibraryDep(nothing, :libquadmath)]
     @test library_deps(static_only) == [JLLLibraryDep(nothing, :libz)]
 
@@ -547,9 +547,9 @@ end
         ])
     end
 
-    # Both realizations' edges are held to the same coherence standard
+    # A dynamic and a static library's edges are held to the same coherence standard
     @test_throws ArgumentError make_jll([
-        JLLLibraryProduct(:libfoo; static = JLLStaticRealization("lib/libfoo.a";
+        JLLLibraryProduct(:libfoo; static = JLLStaticLibrary("lib/libfoo.a";
                                                 deps = [JLLLibraryDep(nothing, :nope)])),
     ])
     @test_throws ArgumentError make_jll([
@@ -559,7 +559,7 @@ end
     # An archive-only product gets a stable identity like any other library, and a
     # library product may depend on it
     jll = make_jll([
-        JLLLibraryProduct(:libfoo; static = JLLStaticRealization("lib/libfoo.a")),
+        JLLLibraryProduct(:libfoo; static = JLLStaticLibrary("lib/libfoo.a")),
         JLLLibraryProduct(:libbar, "lib/libbar.so.1", [];
                           static_path = "lib/libbar.a",
                           static_deps = [JLLLibraryDep(nothing, :libfoo)]),
@@ -604,7 +604,7 @@ end
     end
 
     # A bundled library is found by soname when it declares no path
-    r = parse_toml_dict(JLLDynamicRealization,
+    r = parse_toml_dict(JLLDynamicLibrary,
                         Dict("soname" => "libz.so.1", "deps" => [], "flags" => String[]))
     @test r.path == "libz.so.1"
     @test r.soname == "libz.so.1"

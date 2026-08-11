@@ -7,7 +7,7 @@ const static_pass_name = "resolve_static_libraries!"
     StaticDepResolution
 
 What the auditor learned about a single declared static dependency edge: whether the
-library it names ships a static realization, and which symbols we could actually
+library it names ships a static library, and which symbols we could actually
 observe it providing.  `symbols === nothing` means the edge resolved to a library
 whose files are not reachable from here (it lives in another JLL that was not
 unpacked), so nothing can be verified against it.
@@ -21,10 +21,10 @@ end
 """
     resolve_static_libraries!(scan, pass_results, jll_lib_products, dep_libs; dep_artifact_dirs)
 
-Fill in the static realization of every audited library product, and audit any
+Fill in the static library of every audited library product, and audit any
 archive-only products.
 
-Returns the library products with their static realizations attached, together with
+Returns the library products with their static libraries attached, together with
 new products for the archives that have no dynamic sibling.
 """
 function resolve_static_libraries!(scan::ScanResult,
@@ -69,7 +69,7 @@ function resolve_static_libraries!(scan::ScanResult,
 
     updated_products = JLLLibraryProduct[]
     for product in jll_lib_products
-        static_rel_path = get(scan.static_realizations, product.varname, nothing)
+        static_rel_path = get(scan.static_archives, product.varname, nothing)
         if static_rel_path === nothing
             push!(updated_products, product)
             continue
@@ -100,7 +100,7 @@ function resolve_static_libraries!(scan::ScanResult,
         push!(updated_products, JLLLibraryProduct(
             product.varname,
             product.dynamic,
-            JLLStaticRealization(static_rel_path;
+            JLLStaticLibrary(static_rel_path;
                                  deps = jll_deps,
                                  system_deps = system_deps,
                                  roots = roots),
@@ -126,7 +126,7 @@ function resolve_static_libraries!(scan::ScanResult,
         end
         push!(static_only_products, JLLLibraryProduct(
             slp.varname;
-            static = JLLStaticRealization(rel_path; deps = jll_deps, system_deps, roots),
+            static = JLLStaticLibrary(rel_path; deps = jll_deps, system_deps, roots),
         ))
     end
     append!(updated_products, static_only_products)
@@ -192,7 +192,7 @@ Resolve every declared static dependency edge against the libraries we know abou
 A dangling edge — one naming a JLL we do not depend on, or a library that JLL does
 not provide — is a hard failure, since nothing downstream could ever satisfy it.
 
-Edges that resolve to a library with no static realization are surfaced as warnings:
+Edges that resolve to a library with no static library of its own are surfaced:
 the link will have to provision that dependency dynamically.
 """
 function resolve_static_deps!(ctx, rel_path::String, jll_deps::Vector{JLLLibraryDep})
@@ -212,7 +212,7 @@ function resolve_static_deps!(ctx, rel_path::String, jll_deps::Vector{JLLLibrary
             # say).  It is recorded so that the consumer's provisioning is visible in the
             # audit log, but it must not fail the build, since any non-success result does.
             push_result!(ctx.pass_results, static_pass_name, :success, rel_path,
-                         "Static dependency '$(generate_toml_dict(dep))' has no static realization; " *
+                         "Static dependency '$(generate_toml_dict(dep))' has no static library; " *
                          "a static link against this archive will provision it dynamically")
         end
         push!(resolutions, resolution)
@@ -229,9 +229,9 @@ function resolve_own_dep(ctx, rel_path::String, dep::JLLLibraryDep)
 
     symbols = Set{String}()
     has_static = false
-    static_rel_path = get(ctx.scan.static_realizations, dep.varname, nothing)
+    static_rel_path = get(ctx.scan.static_archives, dep.varname, nothing)
     if static_rel_path === nothing
-        # An archive-only product has no entry in `static_realizations`; find it directly
+        # An archive-only product has no entry in `static_archives`; find it directly
         for (candidate_path, slp) in ctx.scan.static_library_products
             if slp.varname == dep.varname
                 static_rel_path = candidate_path

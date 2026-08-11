@@ -1,4 +1,4 @@
-# A library with only a static realization has no shared library to load, so there is
+# A library that is only ever a static archive has no shared library to load, so there is
 # nothing to `dlopen` and no `LazyLibrary` to construct; all a JLL wrapper can usefully
 # offer is the path to the archive.  What must be linked alongside it -- its dependency
 # edges, system libraries and initializer roots -- is link metadata that the consumer

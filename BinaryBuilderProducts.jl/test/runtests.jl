@@ -71,19 +71,19 @@ declared_of(spec) = canonicalize_static_dep_spec(spec, "deps", nothing)
         end
         @test locate(StaticLibraryProduct("libnope"), dir; env, kwargs...) === nothing
 
-        # A subordinate static realization rides along on its `LibraryProduct`, and
+        # A subordinate static library rides along on its `LibraryProduct`, and
         # shows up as `static_path` in the generated JLL product.
         lp = LibraryProduct("\${shlibdir}/liblzma", :liblzma;
                             static=StaticLibraryProduct("\${libdir}/liblzma.a"))
         jll_product = JLLGenerator.AbstractJLLProduct(lp, dir; env, kwargs...)
-        @test has_static_realization(jll_product)
+        @test has_static_library(jll_product)
         @test basename(jll_product.static.path) == "liblzma.a"
         @test isfile(joinpath(dir, jll_product.static.path))
 
         # ... whereas a `LibraryProduct` without one declares no static metadata
         plain_product = JLLGenerator.AbstractJLLProduct(
             LibraryProduct("\${shlibdir}/liblzma", :liblzma), dir; env, kwargs...)
-        @test !has_static_realization(plain_product)
+        @test !has_static_library(plain_product)
         @test plain_product.static === nothing
     end
 

@@ -40,7 +40,7 @@ struct ScanResult
 
     # This maps the varname of a `LibraryProduct` to the `rel_path` of its
     # subordinate static archive, for those library products that declared one.
-    static_realizations::Dict{Symbol,String}
+    static_archives::Dict{Symbol,String}
 
     # For easy lookup of things by symlink alias
     symlinks::Dict{String,String}
@@ -165,7 +165,7 @@ function scan_files(prefix::String, platform::AbstractPlatform,
     # and the standalone ones.  Note that archives are not dynamic objects, so
     # `binary_objects` (and therefore the SONAME/DT_NEEDED/RPATH passes) never sees them.
     static_product_map = Dict{String,StaticLibraryProduct}()
-    static_realizations = Dict{Symbol,String}()
+    static_archives = Dict{Symbol,String}()
     function locate_static(slp::StaticLibraryProduct, owner::Union{Nothing,LibraryProduct})
         located_path = locate(slp, prefix; env, platform)
         if located_path === nothing
@@ -175,7 +175,7 @@ function scan_files(prefix::String, platform::AbstractPlatform,
         rel_path = relpath_search(symlinks, located_path)
         static_product_map[rel_path] = slp
         if owner !== nothing
-            static_realizations[owner.varname] = rel_path
+            static_archives[owner.varname] = rel_path
         end
         return rel_path
     end
@@ -208,7 +208,7 @@ function scan_files(prefix::String, platform::AbstractPlatform,
         soname_forwards,
         library_product_map,
         static_product_map,
-        static_realizations,
+        static_archives,
         symlinks,
     )
 end

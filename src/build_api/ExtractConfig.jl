@@ -76,7 +76,7 @@ function extract_spec_hash(build_hash::SHA1Hash, extract_script::String, product
     println(hash_buffer, "[products]")
     for product in sort(products; by = p->p.varname)
         println(hash_buffer, "  $(product.varname) = $(product.paths)")
-        # A library's static realization is subordinate, and so would otherwise be
+        # A library's static library is subordinate, and so would otherwise be
         # invisible to the hash even though it changes what we extract.
         if isa(product, LibraryProduct) && product.static !== nothing
             static = product.static
@@ -245,7 +245,7 @@ function find_unlocatable_products(config::ExtractConfig, prefix)
     end
     for product in config.products
         check(product)
-        # Static realizations are subordinate, so they never appear in `config.products`
+        # Static libraries are subordinate, so they never appear in `config.products`
         if isa(product, LibraryProduct) && product.static !== nothing
             check(product.static)
         end

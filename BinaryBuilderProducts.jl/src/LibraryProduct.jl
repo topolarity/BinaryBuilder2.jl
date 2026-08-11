@@ -14,7 +14,7 @@ flags to pass to `dlopen` can be specified as a vector of `Symbols` with the
 
 If this library is also shipped as a static archive, declare that archive by
 passing a [`StaticLibraryProduct`](@ref) as the `static` keyword argument.  The
-dynamic library is the primary realization and defines the identity of the
+dynamic library is the primary one and defines the identity of the
 product, so the subordinate `StaticLibraryProduct` must not carry a `varname`
 of its own.
 

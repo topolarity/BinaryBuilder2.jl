@@ -8,8 +8,8 @@ export JLLInfo, JLLBuildInfo, JLLSourceRecord, JLLArtifactSource, JLLLibraryDep,
        AbstractJLLProduct, JLLExecutableProduct, JLLFileProduct, JLLLibraryProduct,
        JLLPackageDependency, JLLArtifactBinding, AbstractProducts, JLLBuildLicense,
        generate_jll, generate_toml_dict, parse_toml_dict, jll_format_version,
-       has_static_realization, has_dynamic_realization, library_deps,
-       JLLDynamicRealization, JLLStaticRealization
+       has_static_library, has_dynamic_library, library_deps,
+       JLLDynamicLibrary, JLLStaticLibrary
 
 include("RTLD_flags.jl")
 include("PkgCompatHacks.jl")
@@ -101,19 +101,19 @@ function parse_toml_dict(::Type{JLLLibraryDep}, s)
 end
 
 """
-    JLLDynamicRealization
+    JLLDynamicLibrary
 
-The shared-library realization of a library product: what to load, what it loads in
+A library's shared library: what to load, what it loads in
 turn, and how.
 """
-@struct_hash_equal struct JLLDynamicRealization
+@struct_hash_equal struct JLLDynamicLibrary
     path::String
     soname::String
     deps::Vector{JLLLibraryDep}
     flags::Vector{Symbol}
     on_load_callback::Union{Nothing,Symbol}
 
-    function JLLDynamicRealization(path;
+    function JLLDynamicLibrary(path;
                                    soname = basename(path),
                                    deps = JLLLibraryDep[],
                                    flags = rtld_symbols(default_rtld_flags),
@@ -126,7 +126,7 @@ turn, and how.
     end
 end
 
-function generate_toml_dict(r::JLLDynamicRealization)
+function generate_toml_dict(r::JLLDynamicLibrary)
     d = Dict{String,Any}(
         "path" => r.path,
         "soname" => r.soname,
@@ -138,10 +138,10 @@ function generate_toml_dict(r::JLLDynamicRealization)
     end
     return d
 end
-function parse_toml_dict(::Type{JLLDynamicRealization}, d)
+function parse_toml_dict(::Type{JLLDynamicLibrary}, d)
     # `path` is optional and defaults to the soname: a bundled library is found by
     # name in the private shlibdir, rather than at a path within an artifact.
-    return JLLDynamicRealization(
+    return JLLDynamicLibrary(
         get(d, "path", d["soname"]);
         soname = d["soname"],
         deps = [parse_toml_dict(JLLLibraryDep, dep) for dep in d["deps"]],
@@ -151,21 +151,21 @@ function parse_toml_dict(::Type{JLLDynamicRealization}, d)
 end
 
 """
-    JLLStaticRealization
+    JLLStaticLibrary
 
-The static-archive realization of a library product.  `deps` are edges onto other JLL
-libraries, exactly as for the dynamic realization; `system_deps` are bare system
+A library's static archive.  `deps` are edges onto other JLL
+libraries, exactly as for the shared library; `system_deps` are bare system
 library names (`"m"`, `"pthread"`, with no `-l` prefix) that the system provides; and
 `roots` names symbols that must be kept alive when linking the archive, such as the
 constructors that would have run when loading the shared library.
 """
-@struct_hash_equal struct JLLStaticRealization
+@struct_hash_equal struct JLLStaticLibrary
     path::String
     deps::Vector{JLLLibraryDep}
     system_deps::Vector{String}
     roots::Vector{String}
 
-    function JLLStaticRealization(path;
+    function JLLStaticLibrary(path;
                                   deps = JLLLibraryDep[],
                                   system_deps = String[],
                                   roots = String[])
@@ -175,7 +175,7 @@ constructors that would have run when loading the shared library.
     end
 end
 
-function generate_toml_dict(r::JLLStaticRealization)
+function generate_toml_dict(r::JLLStaticLibrary)
     return Dict{String,Any}(
         "path" => r.path,
         "deps" => generate_toml_dict.(r.deps),
@@ -183,8 +183,8 @@ function generate_toml_dict(r::JLLStaticRealization)
         "roots" => r.roots,
     )
 end
-function parse_toml_dict(::Type{JLLStaticRealization}, d)
-    return JLLStaticRealization(
+function parse_toml_dict(::Type{JLLStaticLibrary}, d)
+    return JLLStaticLibrary(
         d["path"];
         deps = [parse_toml_dict(JLLLibraryDep, dep) for dep in get(d, "deps", String[])],
         system_deps = String[string(sd) for sd in get(d, "system_deps", String[])],
@@ -197,19 +197,19 @@ end
 
 A library a JLL provides, identified by its `varname` and its stable `dlid`, and
 realized in one or both of two ways: as a shared library that can be loaded, and as a
-static archive that can be linked.  A product must declare at least one realization;
+static archive that can be linked.  A product must provide at least one of them;
 which ones it declares is exactly what tells a consumer how the library may be used.
 """
 @struct_hash_equal struct JLLLibraryProduct <: AbstractJLLProduct
     varname::Symbol
-    dynamic::Union{Nothing,JLLDynamicRealization}
-    static::Union{Nothing,JLLStaticRealization}
+    dynamic::Union{Nothing,JLLDynamicLibrary}
+    static::Union{Nothing,JLLStaticLibrary}
 
     function JLLLibraryProduct(varname::Symbol,
-                               dynamic::Union{Nothing,JLLDynamicRealization},
-                               static::Union{Nothing,JLLStaticRealization})
+                               dynamic::Union{Nothing,JLLDynamicLibrary},
+                               static::Union{Nothing,JLLStaticLibrary})
         if dynamic === nothing && static === nothing
-            throw(ArgumentError("Library product '$(varname)' declares no realizations; it must have a dynamic realization, a static one, or both"))
+            throw(ArgumentError("Library product '$(varname)' declares neither a dynamic nor a static library; it must have at least one"))
         end
         return new(varname, dynamic, static)
     end
@@ -218,7 +218,7 @@ end
 """
     JLLLibraryProduct(varname; dynamic, static)
 
-Declare a library product directly from its realizations.  A library's identity is
+Declare a library product directly from its dynamic and static libraries.  A library's identity is
 stated once for the whole JLL, in `JLLInfo`, rather than repeated in every build.
 """
 function JLLLibraryProduct(varname; dynamic = nothing, static = nothing)
@@ -229,7 +229,7 @@ end
     JLLLibraryProduct(varname, path, deps; kwargs...)
 
 Convenience constructor for the common case of a library that has a shared-library
-realization, optionally accompanied by a static one.
+library, optionally accompanied by a static one.
 """
 function JLLLibraryProduct(varname, path, deps;
                            flags = rtld_symbols(default_rtld_flags),
@@ -243,32 +243,32 @@ function JLLLibraryProduct(varname, path, deps;
         throw(ArgumentError("Library product '$(varname)' declares static metadata without a `static_path`!"))
     end
     static = static_path === nothing ? nothing :
-        JLLStaticRealization(static_path; deps=static_deps, system_deps=static_system_deps, roots=static_roots)
+        JLLStaticLibrary(static_path; deps=static_deps, system_deps=static_system_deps, roots=static_roots)
     return JLLLibraryProduct(
         Symbol(varname),
-        JLLDynamicRealization(path; soname, deps, flags, on_load_callback),
+        JLLDynamicLibrary(path; soname, deps, flags, on_load_callback),
         static,
     )
 end
 
 """
-    has_static_realization(lp::JLLLibraryProduct)
+    has_static_library(lp::JLLLibraryProduct)
 
 Returns `true` if this library ships a static archive.
 """
-has_static_realization(lp::JLLLibraryProduct) = lp.static !== nothing
+has_static_library(lp::JLLLibraryProduct) = lp.static !== nothing
 
 """
-    has_dynamic_realization(lp::JLLLibraryProduct)
+    has_dynamic_library(lp::JLLLibraryProduct)
 
 Returns `true` if this library ships a shared library that can be loaded.
 """
-has_dynamic_realization(lp::JLLLibraryProduct) = lp.dynamic !== nothing
+has_dynamic_library(lp::JLLLibraryProduct) = lp.dynamic !== nothing
 
 """
     library_deps(lp::JLLLibraryProduct)
 
-Every library this product depends on, across all of its realizations.
+Every library this product depends on, across both its dynamic and static libraries.
 """
 function library_deps(lp::JLLLibraryProduct)
     deps = JLLLibraryDep[]
@@ -296,8 +296,8 @@ end
 function parse_toml_dict(::Type{JLLLibraryProduct}, varname, d)
     return JLLLibraryProduct(
         Symbol(varname),
-        haskey(d, "dynamic") ? parse_toml_dict(JLLDynamicRealization, d["dynamic"]) : nothing,
-        haskey(d, "static") ? parse_toml_dict(JLLStaticRealization, d["static"]) : nothing,
+        haskey(d, "dynamic") ? parse_toml_dict(JLLDynamicLibrary, d["dynamic"]) : nothing,
+        haskey(d, "static") ? parse_toml_dict(JLLStaticLibrary, d["static"]) : nothing,
     )
 end
 
@@ -575,7 +575,7 @@ easier for non-BinaryBuilder2 users to make use of this package if needed.
         # Quick verification of dependency structure, to ensure we're not incoherent.
         for p in products
             if isa(p, JLLLibraryProduct)
-                # Every realization's edges are held to the same standard.
+                # A dynamic and a static library's edges are held to the same standard.
                 edges = Iterators.flatten((
                     ((d, "depends") for d in (p.dynamic === nothing ? JLLLibraryDep[] : p.dynamic.deps)),
                     ((d, "statically depends") for d in (p.static === nothing ? JLLLibraryDep[] : p.static.deps)),
@@ -700,7 +700,7 @@ end
 
 The stable identity of every library the JLL provides, stated once for the whole
 package rather than repeated in each build: identity is a property of the library, not
-of any one platform's realization of it.  Each is `uuid5(pkg_uuid, varname)`,
+of any one platform's build of it.  Each is `uuid5(pkg_uuid, varname)`,
 namespaced under the JLL package's UUID so that it is stable across rebuilds and
 versions.
 """
@@ -831,7 +831,7 @@ UUID(info::JLLInfo) = jll_package_uuid(info.name)
 
 The version of the `JLL.toml` format this package writes.  A reader must refuse a
 record whose major version it does not know rather than guessing: v2 moved every
-library product's realizations into `dynamic`/`static` sub-tables, so v1 and v2
+library product's paths into separate `dynamic` and `static` tables, so v1 and v2
 records disagree about where a library's path lives.
 """
 const jll_format_version = v"2.0.0"
@@ -865,7 +865,7 @@ end
     check_jll_format(d::Dict)
 
 Refuse a `JLL.toml` this version cannot read.  A record with no `jll_format` marker
-predates the realization-group format and describes its library products in a shape we
+predates the per-linkage tables and describes its library products in a shape we
 no longer understand, so it is rejected outright rather than misread.
 """
 function check_jll_format(d::Dict)

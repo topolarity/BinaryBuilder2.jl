@@ -177,13 +177,13 @@ end
     product_path(product)
 
 The artifact-relative path a product's variable should resolve to.  A library keeps
-its path inside a realization sub-table, preferring the shared library when it has
+its path inside a per-linkage table, preferring the shared library when it has
 one, since that is what a consumer loads.
 """
 function product_path(product)
     if product["type"] == "library"
-        realization = haskey(product, "dynamic") ? product["dynamic"] : product["static"]
-        return realization["path"]
+        linkage = haskey(product, "dynamic") ? product["dynamic"] : product["static"]
+        return linkage["path"]
     end
     return product["path"]
 end

@@ -116,7 +116,7 @@ end
     check_jll_format(jll, toml_path)
 
 Refuse a `JLL.toml` written in a format this wrapper cannot read.  A record with no
-`jll_format` marker predates the realization-group format, where a library product's
+`jll_format` marker predates the per-linkage tables, where a library product's
 path moved into a `dynamic`/`static` sub-table, so reading it here would silently
 misinterpret every library.
 """
@@ -198,7 +198,7 @@ macro generate_jll_from_toml()
     top_level_statements(jb, build, platform)
 
     # Sort our library products so that they are in dependency-order.  Only the ones
-    # with a shared realization take part: an archive is never loaded, so it has no
+    # with a shared library take part: an archive is never loaded, so it has no
     # place in a load order.
     lib_products = [p for p in build["products"] if p["type"] == "library" && haskey(p, "dynamic")]
     function calc_depths(lib_products)
@@ -251,7 +251,7 @@ macro generate_jll_from_toml()
     # Next all the other products
     for product in build["products"]
         if product["type"] == "library"
-            # Those with a shared realization were emitted above; the rest are
+            # Those with a shared library were emitted above; the rest are
             # archives, which we can only offer as a path.
             if !haskey(product, "dynamic")
                 static_library_product_definition(jb, build, product)

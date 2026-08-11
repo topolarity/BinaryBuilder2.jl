@@ -65,7 +65,7 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
         build_static_prefix(prefix; with_extra)
 
     Build a prefix containing `libplus` and `libmult` in both their dynamic and static
-    realizations.  `libplus`'s archive additionally contains an object with a static
+    forms.  `libplus`'s archive additionally contains an object with a static
     constructor, so that it has a `root`, and one calling into libc, so that its
     closure must be verified against symbols the shared library records with a
     version suffix; if `with_extra` is set, `libmult`'s archive also contains an
@@ -87,12 +87,12 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
             extra_o = compile(libextra_c_path)
             alloc_o = compile(liballoc_c_path)
 
-            # Dynamic realizations; `libmult` links against `libplus`
+            # Shared libraries; `libmult` links against `libplus`
             run(setenv(`$(env["CC"]) -o $(joinpath(libdir, libplus_soname)) -shared $(plus_o) $(ctor_o) $(alloc_o) $(soname_flag(target_platform, libplus_soname))`, env))
             symlink(libplus_soname, joinpath(libdir, "libplus$(dlext(platform))"))
             run(setenv(`$(env["CC"]) -o $(joinpath(libdir, libmult_soname)) -shared $(mult_o) -L $(libdir) -lplus $(soname_flag(target_platform, libmult_soname))`, env))
 
-            # Static realizations
+            # Static archives
             run(setenv(`$(env["AR"]) crs $(joinpath(libdir, "libplus.a")) $(plus_o) $(ctor_o) $(alloc_o)`, env))
             mult_members = with_extra ? [mult_o, extra_o] : [mult_o]
             run(setenv(`$(env["AR"]) crs $(joinpath(libdir, "libmult.a")) $(mult_members)`, env))
@@ -116,7 +116,7 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
         jll_lib_products = resolve_static_libraries!(scan, pass_results, jll_lib_products,
                                                      dep_libs; dep_artifact_dirs)
         by_varname = Dict(p.varname => p for p in jll_lib_products)
-        # Archive-only products are library products too; they simply have no dynamic group
+        # Archive-only products are library products too; they simply have no dynamic library
         standalone = [p for p in jll_lib_products if p.dynamic === nothing]
         return (; scan, pass_results, jll_lib_products, standalone, by_varname)
     end
@@ -223,10 +223,10 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
             # `Zlib_jll` resolved, but its files are not reachable from here, so an
             # unresolved symbol can only be a warning
             @test !has_status(r.pass_results, static_pass_name, libmult.static.path, :fail)
-            # ... and it has no static realization, which we surface without failing the
+            # ... and it has no static library, which we surface without failing the
             # build, since linking an archive against a dynamic-only dependency is normal
             @test contains(messages(r.pass_results, static_pass_name, libmult.static.path),
-                           "no static realization")
+                           "no static library")
 
             # `system_deps` behaves identically: replacement warns about omissions...
             r = run_static_passes(prefix, [
@@ -404,7 +404,7 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
             info = only(r.standalone)
             @test isa(info, JLLLibraryProduct)
             @test info.varname == :libmult_a
-            # An archive-only product has no dynamic realization at all
+            # An archive-only product has no dynamic library at all
             @test info.dynamic === nothing
             @test info.static.path == joinpath("lib", "libmult.a")
             @test info.static.deps == [JLLLibraryDep(nothing, :libplus)]
@@ -446,7 +446,7 @@ end
         @test success(result)
         libplus = only(result.jll_lib_products)
         @test libplus.static.path == joinpath("lib", "libplus.a")
-        @test has_static_realization(libplus)
+        @test has_static_library(libplus)
         @test "c" ∈ libplus.static.system_deps
 
         # A second, read-only audit does not perturb the archive

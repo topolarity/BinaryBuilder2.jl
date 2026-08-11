@@ -8,7 +8,7 @@ function resolve_dynamic_links!(scan::ScanResult,
     dep_soname_map = Dict{String,Tuple{Symbol,Symbol}}()
     for (jll_name, libs) in dep_libs
         for lib in libs
-            # A library with no shared realization can never satisfy a `DT_NEEDED`
+            # A library with no shared library can never satisfy a `DT_NEEDED`
             if lib.dynamic === nothing
                 continue
             end

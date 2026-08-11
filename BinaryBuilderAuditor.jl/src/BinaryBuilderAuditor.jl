@@ -53,7 +53,7 @@ function audit!(prefix::String,
     # Solve dynamic linkage, obtaining the output JLLLibraryProduct objects
     jll_lib_products = resolve_dynamic_links!(scan, pass_results, dep_libs)
 
-    # Attach the static realization of each library product, and audit standalone archives
+    # Attach the static library of each library product, and audit standalone archives
     jll_lib_products = resolve_static_libraries!(scan, pass_results, jll_lib_products, dep_libs; dep_artifact_dirs)
 
     # Ensure that all libraries and executables have the correct RPATH setup
