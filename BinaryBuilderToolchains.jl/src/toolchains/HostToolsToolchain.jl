@@ -41,7 +41,12 @@ struct HostToolsToolchain <: AbstractToolchain
             "Ccache_jll",
             "file_jll",
             "flex_jll",
-            "gawk_jll",
+            # gawk v5.4.1 changed the behavior of an array element created by an
+            # `== ""` comparison; it afterwards concatenates as "0" rather than "",
+            # silently corrupting scripts that accumulate into such an element.
+            # GCC's `optc-gen.awk` does exactly that, so the `options.cc` it
+            # generates no longer compiles.  v5.4.0 is the newest unaffected release.
+            PackageSpec(;name="gawk_jll", version=v"5.4.0+0"),
             # We use make v4.3, rather than the latest, because glibc's build system
             # falls into an infinite loop with `make v4.4+`.  Eventually, we'll make
             # it easy enough to customize that we'll just override this choice when
