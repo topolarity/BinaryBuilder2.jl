@@ -113,9 +113,11 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
         pass_results = Dict{String,Vector{PassResult}}()
         ensure_sonames!(scan, pass_results)
         jll_lib_products = resolve_dynamic_links!(scan, pass_results, dep_libs)
-        jll_lib_products, standalone = resolve_static_libraries!(scan, pass_results, jll_lib_products,
-                                                                 dep_libs; dep_artifact_dirs)
+        jll_lib_products = resolve_static_libraries!(scan, pass_results, jll_lib_products,
+                                                     dep_libs; dep_artifact_dirs)
         by_varname = Dict(p.varname => p for p in jll_lib_products)
+        # Archive-only products are library products too; they simply have no dynamic group
+        standalone = [p for p in jll_lib_products if p.dynamic === nothing]
         return (; scan, pass_results, jll_lib_products, standalone, by_varname)
     end
 
@@ -164,30 +166,30 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
             libmult = r.by_varname[:libmult]
 
             # Both products point at their archives, and keep their dynamic path
-            @test libplus.static_path == joinpath("lib", "libplus.a")
-            @test libmult.static_path == joinpath("lib", "libmult.a")
-            @test libmult.path == joinpath("lib", libmult_soname)
+            @test libplus.static.path == joinpath("lib", "libplus.a")
+            @test libmult.static.path == joinpath("lib", "libmult.a")
+            @test libmult.dynamic.path == joinpath("lib", libmult_soname)
 
             # `libmult`'s archive inherits the dynamic sibling's resolved JLL edges
-            @test libmult.static_deps == [JLLLibraryDep(nothing, :libplus)]
-            @test isempty(libplus.static_deps)
+            @test libmult.static.deps == [JLLLibraryDep(nothing, :libplus)]
+            @test isempty(libplus.static.deps)
 
             # ... and the system edges that `resolve_dynamic_links!()` drops
             if Sys.islinux(target_platform)
-                @test "c" ∈ libplus.static_system_deps
+                @test "c" ∈ libplus.static.system_deps
             else
-                @test "System" ∈ libplus.static_system_deps
+                @test "System" ∈ libplus.static.system_deps
             end
             # System deps are bare linker names, never `-l`-prefixed or versioned
-            @test all(!startswith(d, "-l") && !contains(d, ".so") for d in libplus.static_system_deps)
+            @test all(!startswith(d, "-l") && !contains(d, ".so") for d in libplus.static.system_deps)
 
             # The member with a static constructor is recorded as a root
-            @test libplus.static_roots == [mangle("ctor_status")]
-            @test isempty(libmult.static_roots)
+            @test libplus.static.roots == [mangle("ctor_status")]
+            @test isempty(libmult.static.roots)
 
             # The closure of both archives verified cleanly
-            @test has_status(r.pass_results, static_pass_name, libplus.static_path, :success)
-            @test has_status(r.pass_results, static_pass_name, libmult.static_path, :success)
+            @test has_status(r.pass_results, static_pass_name, libplus.static.path, :success)
+            @test has_status(r.pass_results, static_pass_name, libmult.static.path, :success)
         end
     end
 
@@ -203,9 +205,9 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
                                static=StaticLibraryProduct("libmult.a"; deps=String[])),
             ])
             libmult = r.by_varname[:libmult]
-            @test isempty(libmult.static_deps)
-            @test has_status(r.pass_results, static_pass_name, libmult.static_path, :warn)
-            @test contains(messages(r.pass_results, static_pass_name, libmult.static_path), "libplus")
+            @test isempty(libmult.static.deps)
+            @test has_status(r.pass_results, static_pass_name, libmult.static.path, :warn)
+            @test contains(messages(r.pass_results, static_pass_name, libmult.static.path), "libplus")
 
             # The `:inherit` sentinel augments rather than replaces
             zlib_dep_libs = Dict{Symbol,Vector{JLLLibraryProduct}}(
@@ -217,13 +219,13 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
                                static=StaticLibraryProduct("libmult.a"; deps=[:inherit, "Zlib_jll.libz"])),
             ]; dep_libs = zlib_dep_libs)
             libmult = r.by_varname[:libmult]
-            @test libmult.static_deps == [JLLLibraryDep(nothing, :libplus), JLLLibraryDep(:Zlib_jll, :libz)]
+            @test libmult.static.deps == [JLLLibraryDep(nothing, :libplus), JLLLibraryDep(:Zlib_jll, :libz)]
             # `Zlib_jll` resolved, but its files are not reachable from here, so an
             # unresolved symbol can only be a warning
-            @test !has_status(r.pass_results, static_pass_name, libmult.static_path, :fail)
+            @test !has_status(r.pass_results, static_pass_name, libmult.static.path, :fail)
             # ... and it has no static realization, which we surface without failing the
             # build, since linking an archive against a dynamic-only dependency is normal
-            @test contains(messages(r.pass_results, static_pass_name, libmult.static_path),
+            @test contains(messages(r.pass_results, static_pass_name, libmult.static.path),
                            "no static realization")
 
             # `system_deps` behaves identically: replacement warns about omissions...
@@ -233,8 +235,8 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
                 LibraryProduct("libmult", :libmult; static=StaticLibraryProduct("libmult.a")),
             ])
             libplus = r.by_varname[:libplus]
-            @test isempty(libplus.static_system_deps)
-            @test has_status(r.pass_results, static_pass_name, libplus.static_path, :warn)
+            @test isempty(libplus.static.system_deps)
+            @test has_status(r.pass_results, static_pass_name, libplus.static.path, :warn)
 
             # ... and the sentinel augments
             r = run_static_passes(prefix, [
@@ -243,9 +245,9 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
                 LibraryProduct("libmult", :libmult; static=StaticLibraryProduct("libmult.a")),
             ])
             libplus = r.by_varname[:libplus]
-            @test "rt" ∈ libplus.static_system_deps
-            @test length(libplus.static_system_deps) > 1
-            @test !has_status(r.pass_results, static_pass_name, libplus.static_path, :warn)
+            @test "rt" ∈ libplus.static.system_deps
+            @test length(libplus.static.system_deps) > 1
+            @test !has_status(r.pass_results, static_pass_name, libplus.static.path, :warn)
         end
     end
 
@@ -261,11 +263,11 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
             ])
             libmult = r.by_varname[:libmult]
             @test !success(r.pass_results)
-            @test has_status(r.pass_results, static_pass_name, libmult.static_path, :fail)
-            @test contains(messages(r.pass_results, static_pass_name, libmult.static_path),
+            @test has_status(r.pass_results, static_pass_name, libmult.static.path, :fail)
+            @test contains(messages(r.pass_results, static_pass_name, libmult.static.path),
                            mangle("undefined_extra_symbol"))
             # `libplus` is still perfectly fine
-            @test has_status(r.pass_results, static_pass_name, r.by_varname[:libplus].static_path, :success)
+            @test has_status(r.pass_results, static_pass_name, r.by_varname[:libplus].static.path, :success)
         end
     end
 
@@ -297,11 +299,11 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
                 ])
                 libmult = r.by_varname[:libmult]
                 # The edge is recorded as a real dependency...
-                @test JLLLibraryDep(nothing, :libgcc_s) ∈ libmult.static_deps
+                @test JLLLibraryDep(nothing, :libgcc_s) ∈ libmult.static.deps
                 # ... and is *not* reported as a system library
-                @test "gcc_s" ∉ libmult.static_system_deps
+                @test "gcc_s" ∉ libmult.static.system_deps
                 # The C runtime is still a system dependency
-                @test "c" ∈ libmult.static_system_deps
+                @test "c" ∈ libmult.static.system_deps
             end
         end
     end
@@ -317,8 +319,8 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
                                static=StaticLibraryProduct("libmult.a"; deps=["libnope"])),
             ])
             libmult = r.by_varname[:libmult]
-            @test has_status(r.pass_results, static_pass_name, libmult.static_path, :fail)
-            @test contains(messages(r.pass_results, static_pass_name, libmult.static_path),
+            @test has_status(r.pass_results, static_pass_name, libmult.static.path, :fail)
+            @test contains(messages(r.pass_results, static_pass_name, libmult.static.path),
                            "does not name any library product")
 
             # ... as is one naming a JLL we do not depend on
@@ -328,8 +330,8 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
                                static=StaticLibraryProduct("libmult.a"; deps=["Nope_jll.libnope"])),
             ])
             libmult = r.by_varname[:libmult]
-            @test has_status(r.pass_results, static_pass_name, libmult.static_path, :fail)
-            @test contains(messages(r.pass_results, static_pass_name, libmult.static_path),
+            @test has_status(r.pass_results, static_pass_name, libmult.static.path, :fail)
+            @test contains(messages(r.pass_results, static_pass_name, libmult.static.path),
                            "not a dependency of this build")
 
             # ... as is one naming a library that dependency does not provide
@@ -340,8 +342,8 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
             ]; dep_libs = Dict{Symbol,Vector{JLLLibraryProduct}}(
                 :Zlib => [JLLLibraryProduct(:libz, "lib/libz.so.1", [])]))
             libmult = r.by_varname[:libmult]
-            @test has_status(r.pass_results, static_pass_name, libmult.static_path, :fail)
-            @test contains(messages(r.pass_results, static_pass_name, libmult.static_path),
+            @test has_status(r.pass_results, static_pass_name, libmult.static.path, :fail)
+            @test contains(messages(r.pass_results, static_pass_name, libmult.static.path),
                            "does not name a library product")
         end
     end
@@ -367,11 +369,11 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
                 ],
                 dep_libs = plus_libs, dep_artifact_dirs = reachable)
             info = only(r.standalone)
-            @test has_status(r.pass_results, static_pass_name, info.path, :success)
+            @test has_status(r.pass_results, static_pass_name, info.static.path, :success)
             # It resolved to a library that does ship an archive, and every symbol was
             # verified against the real files, so nothing is left unproven
-            @test !has_status(r.pass_results, static_pass_name, info.path, :warn)
-            @test !has_status(r.pass_results, static_pass_name, info.path, :fail)
+            @test !has_status(r.pass_results, static_pass_name, info.static.path, :warn)
+            @test !has_status(r.pass_results, static_pass_name, info.static.path, :fail)
 
             # With the very same declaration but the artifact out of reach, we cannot
             # verify, and say so rather than pretending
@@ -383,8 +385,8 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
                 ],
                 dep_libs = plus_libs)
             info = only(r.standalone)
-            @test has_status(r.pass_results, static_pass_name, info.path, :warn)
-            @test contains(messages(r.pass_results, static_pass_name, info.path), "could not inspect")
+            @test has_status(r.pass_results, static_pass_name, info.static.path, :warn)
+            @test contains(messages(r.pass_results, static_pass_name, info.static.path), "could not inspect")
         end
     end
 
@@ -400,17 +402,19 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
                     StaticLibraryProduct("libmult.a"; varname=:libmult_a, deps=["libplus"], system_deps=["c"]),
                 ])
             info = only(r.standalone)
-            @test isa(info, JLLStaticLibraryProduct)
+            @test isa(info, JLLLibraryProduct)
             @test info.varname == :libmult_a
-            @test info.path == joinpath("lib", "libmult.a")
-            @test info.deps == [JLLLibraryDep(nothing, :libplus)]
-            @test info.system_deps == ["c"]
-            @test info.roots == String[]
+            # An archive-only product has no dynamic realization at all
+            @test info.dynamic === nothing
+            @test info.static.path == joinpath("lib", "libmult.a")
+            @test info.static.deps == [JLLLibraryDep(nothing, :libplus)]
+            @test info.static.system_deps == ["c"]
+            @test info.static.roots == String[]
             # `libplus` is in the prefix, so `mult`'s reference to `plus` resolves
-            @test has_status(r.pass_results, static_pass_name, info.path, :success)
+            @test has_status(r.pass_results, static_pass_name, info.static.path, :success)
 
             # Standalone archives are not folded into the dynamic products
-            @test all(p.static_path === nothing for p in r.jll_lib_products)
+            @test all(p.static === nothing for p in r.jll_lib_products if p.dynamic !== nothing)
         end
     end
 end
@@ -440,11 +444,10 @@ end
                         Dict{Symbol,Vector{JLLLibraryProduct}}();
                         platform=target_platform)
         @test success(result)
-        @test isempty(result.static_only_products)
         libplus = only(result.jll_lib_products)
-        @test libplus.static_path == joinpath("lib", "libplus.a")
+        @test libplus.static.path == joinpath("lib", "libplus.a")
         @test has_static_realization(libplus)
-        @test "c" ∈ libplus.static_system_deps
+        @test "c" ∈ libplus.static.system_deps
 
         # A second, read-only audit does not perturb the archive
         pre_treehash = treehash(prefix)

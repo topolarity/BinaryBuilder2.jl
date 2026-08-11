@@ -138,18 +138,24 @@ function AbstractProduct(lp::JLLLibraryProduct; artifact, artifacts, cache)
         # Reconstruct the static realization, if there is one.  The dependency lists
         # are given explicitly, as there is nothing left to inherit at this point.
         static = nothing
-        if lp.static_path !== nothing
+        if lp.static !== nothing
             static = StaticLibraryProduct(
-                lp.static_path;
-                deps = String[generate_toml_dict(dep) for dep in lp.static_deps],
-                system_deps = copy(lp.static_system_deps),
+                lp.static.path;
+                deps = String[generate_toml_dict(dep) for dep in lp.static.deps],
+                system_deps = copy(lp.static.system_deps),
+                varname = lp.dynamic === nothing ? lp.varname : nothing,
             )
         end
+        if lp.dynamic === nothing
+            # A library with only an archive is reconstructed as a standalone
+            # `StaticLibraryProduct`; there is no dynamic product to subordinate it to.
+            return static
+        end
         return LibraryProduct(
-            lp.path,
+            lp.dynamic.path,
             lp.varname;
-            dlopen_flags = lp.flags,
-            on_load_callback = lp.on_load_callback,
+            dlopen_flags = lp.dynamic.flags,
+            on_load_callback = lp.dynamic.on_load_callback,
             static,
         )
     end

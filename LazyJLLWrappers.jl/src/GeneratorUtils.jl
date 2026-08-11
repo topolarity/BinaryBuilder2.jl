@@ -173,6 +173,21 @@ function emit_typed_global(name, type, val; isconst::Bool = false)
     return ret
 end
 
+"""
+    product_path(product)
+
+The artifact-relative path a product's variable should resolve to.  A library keeps
+its path inside a realization sub-table, preferring the shared library when it has
+one, since that is what a consumer loads.
+"""
+function product_path(product)
+    if product["type"] == "library"
+        realization = haskey(product, "dynamic") ? product["dynamic"] : product["static"]
+        return realization["path"]
+    end
+    return product["path"]
+end
+
 function product_names(product)
     var_name = Symbol(product["name"])
     path_var_name = Symbol(string(product["name"], "_path"))
@@ -195,7 +210,7 @@ function gen_lazy_artifact_path(jb::JLLBlocks, build, product)
     lazy_artifact_path = quote
         LazyArtifactPath(
             $(treehash),
-            $(product["path"]),
+            $(product_path(product)),
         )
     end
 
@@ -229,7 +244,8 @@ function init_footer(jb::JLLBlocks, build)
         if product["type"] == "executable"
             push!(jb.init_blocks, :(push!(PATH_list, $(path_var_name))))
         end
-        if product["type"] == "library"
+        # Only a loadable library belongs on `LIBPATH`
+        if product["type"] == "library" && haskey(product, "dynamic")
             push!(jb.init_blocks, :(push!(LIBPATH_list, $(path_var_name))))
         end
     end

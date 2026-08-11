@@ -135,9 +135,9 @@ mit_license = JLLBuildLicense("LICENSE.md", JLLGenerator.get_license_text("MIT")
         @test length(d["builds"][aidx]["sources"]) == 1
 
         prods = d["builds"][aidx]["products"]
-        for prod in prods
+        for (prod_name, prod) in prods
             if prod["type"] == "library"
-                @test only(prod["deps"]) == "Glibc_jll.libc"
+                @test only(prod["dynamic"]["deps"]) == "Glibc_jll.libc"
             end
         end
     end
@@ -347,7 +347,7 @@ end
     d, new_jll = roundtrip_jll_through_toml(jll)
 
     products = only(d["builds"])["products"]
-    @test length([p for p in products if p["type"] == "library" && length(p["deps"]) > 0]) == 2
+    @test length([p for (_, p) in products if p["type"] == "library" && length(p["dynamic"]["deps"]) > 0]) == 2
 
     # Also test that this roundtripped properly
     @test jll == new_jll
@@ -426,23 +426,12 @@ using JLLGenerator: uuid5
 end
 
 @testset "Library identity (dlid)" begin
-    # `dlid` defaults to `nothing` on a standalone product, and is
-    # then omitted from the TOML dict
+    # Identity is a property of the library, not of any one build's realization of it,
+    # so it is stated once at the top level and appears nowhere in a build.
     lp = JLLLibraryProduct(:libzstd, "lib/libzstd.so.1", [])
-    @test lp.dlid === nothing
     @test !haskey(generate_toml_dict(lp), "dlid")
-    @test parse_toml_dict(JLLLibraryProduct, generate_toml_dict(lp)) == lp
 
-    # An explicit `dlid` roundtrips through the TOML dict
-    dlid = Base.UUID("d91c531c-5cb2-4b4c-b32b-3f7ad0f81f0f")
-    lp = JLLLibraryProduct(:libzstd, "lib/libzstd.so.1", []; dlid)
-    d = generate_toml_dict(lp)
-    @test d["dlid"] == string(dlid)
-    @test parse_toml_dict(JLLLibraryProduct, d) == lp
-
-    # Assembling a `JLLInfo` fills in `uuid5(pkg_uuid, string(varname))` for
-    # any library product that does not declare a `dlid`
-    function make_zlib_jll(products)
+    function make_zlib_jll(products; kwargs...)
         return JLLInfo(;
             name = "Zlib",
             version = v"1.2.13+1",
@@ -459,132 +448,88 @@ end
                     licenses = [mit_license],
                 ),
             ],
+            kwargs...,
         )
     end
 
+    # Assembling a `JLLInfo` names every library it provides
     jll = make_zlib_jll([JLLLibraryProduct(:libz, "lib/libz.so.1", [])])
-    libz = only(only(jll.builds).products)
-    @test libz.dlid == uuid5(Base.UUID(jll), "libz")
+    @test jll.products == Dict(:libz => uuid5(Base.UUID(jll), "libz"))
 
-    # The populated `dlid` survives the round-trip through TOML
     d, new_jll = roundtrip_jll_through_toml(jll)
-    @test only(only(d["builds"])["products"])["dlid"] == string(libz.dlid)
+    @test d["products"]["libz"]["dlid"] == string(jll.products[:libz])
+    # ... and nothing about identity leaks into the build
+    @test !haskey(only(d["builds"])["products"]["libz"], "dlid")
     @test new_jll == jll
 
-    # An explicitly-declared `dlid` is not overwritten
-    jll = make_zlib_jll([JLLLibraryProduct(:libz, "lib/libz.so.1", []; dlid)])
-    @test only(only(jll.builds).products).dlid == dlid
+    # Only libraries are named; an executable has no identity
+    jll = make_zlib_jll([
+        JLLLibraryProduct(:libz, "lib/libz.so.1", []),
+        JLLExecutableProduct(:zlib_tool, "bin/zlib_tool"),
+    ])
+    @test sort(collect(keys(jll.products))) == [:libz]
+
+    # An explicitly-supplied identity is honored rather than recomputed
+    dlid = Base.UUID("d91c531c-5cb2-4b4c-b32b-3f7ad0f81f0f")
+    jll = make_zlib_jll([JLLLibraryProduct(:libz, "lib/libz.so.1", [])];
+                        products = Dict(:libz => dlid))
+    @test jll.products[:libz] == dlid
+    @test roundtrip_jll_through_toml(jll)[2] == jll
+
+    # A library realized by a build but missing from the identity table is incoherent
+    @test_throws ArgumentError make_zlib_jll([JLLLibraryProduct(:libz, "lib/libz.so.1", [])];
+                                             products = Dict{Symbol,Base.UUID}())
 end
 
-@testset "Static library realization" begin
-    # A library without a static realization declares no static metadata at all,
-    # so that existing JLLs are byte-for-byte unchanged
-    lp = JLLLibraryProduct(:libgfortran, "lib/libgfortran.so.5", [])
-    @test !has_static_realization(lp)
-    @test lp.static_path === nothing
+@testset "Realization groups" begin
+    # A library with both realizations nests each one under its own group
+    lp = JLLLibraryProduct(:libgfortran, "lib/libgfortran.so.5.0.0",
+                           [JLLLibraryDep(nothing, :libquadmath)];
+                           soname = "libgfortran.so.5",
+                           static_path = "lib/libgfortran.a",
+                           static_deps = [JLLLibraryDep(nothing, :libquadmath)],
+                           static_system_deps = ["c", "m"],
+                           static_roots = ["ctor"])
+    @test has_dynamic_realization(lp) && has_static_realization(lp)
     d = generate_toml_dict(lp)
-    @test !any(haskey(d, k) for k in ("static_path", "static_deps", "static_system_deps", "static_roots"))
-    @test parse_toml_dict(JLLLibraryProduct, d) == lp
+    @test d["type"] == "library"
+    # Nothing about a realization leaks to the top level any more
+    @test !any(haskey(d, k) for k in ("path", "soname", "flags", "deps", "static_path"))
+    @test d["dynamic"]["path"] == "lib/libgfortran.so.5.0.0"
+    @test d["dynamic"]["soname"] == "libgfortran.so.5"
+    @test d["dynamic"]["deps"] == ["libquadmath"]
+    @test d["static"]["path"] == "lib/libgfortran.a"
+    @test d["static"]["system_deps"] == ["c", "m"]
+    @test d["static"]["roots"] == ["ctor"]
+    @test parse_toml_dict(JLLLibraryProduct, "libgfortran", d) == lp
 
-    # Static metadata is meaningless without an archive to attach it to
-    @test_throws ArgumentError JLLLibraryProduct(:libgfortran, "lib/libgfortran.so.5", [];
-                                                 static_system_deps = ["m"])
+    # A library with only a shared realization has no `static` group at all
+    dyn_only = JLLLibraryProduct(:libz, "lib/libz.so.1", [])
+    @test !has_static_realization(dyn_only)
+    @test !haskey(generate_toml_dict(dyn_only), "static")
+    @test parse_toml_dict(JLLLibraryProduct, "libz", generate_toml_dict(dyn_only)) == dyn_only
 
-    # ... and roundtrips faithfully when present
-    static_deps = [JLLLibraryDep(nothing, :libgcc_s), JLLLibraryDep(:CSL_jll, :libquadmath)]
-    lp = JLLLibraryProduct(
-        :libgfortran,
-        "lib/libgfortran.so.5",
-        [JLLLibraryDep(nothing, :libgcc_s)];
-        static_path = "lib/libgfortran.a",
-        static_deps,
-        static_system_deps = ["m", "pthread"],
-        static_roots = ["_gfortrani_estr_write"],
-    )
-    @test has_static_realization(lp)
-    d = generate_toml_dict(lp)
-    @test d["static_path"] == "lib/libgfortran.a"
-    @test d["static_deps"] == ["libgcc_s", "CSL_jll.libquadmath"]
-    @test d["static_system_deps"] == ["m", "pthread"]
-    @test d["static_roots"] == ["_gfortrani_estr_write"]
-    @test parse_toml_dict(JLLLibraryProduct, d) == lp
+    # ... and one with only an archive has no `dynamic` group, which is how a consumer
+    # knows that asking to load it is an error rather than an oversight
+    static_only = JLLLibraryProduct(:libfoo;
+        static = JLLStaticRealization("lib/libfoo.a";
+                                      deps = [JLLLibraryDep(nothing, :libz)],
+                                      system_deps = ["m"]))
+    @test !has_dynamic_realization(static_only)
+    d2 = generate_toml_dict(static_only)
+    @test d2["type"] == "library"
+    @test !haskey(d2, "dynamic")
+    @test d2["static"]["path"] == "lib/libfoo.a"
+    @test parse_toml_dict(AbstractJLLProduct, "libfoo", d2) == static_only
 
-    # An empty roots list is still emitted, since the archive does exist
-    lp = JLLLibraryProduct(:libgfortran, "lib/libgfortran.so.5", [];
-                           static_path = "lib/libgfortran.a")
-    d = generate_toml_dict(lp)
-    @test d["static_roots"] == String[]
-    @test parse_toml_dict(JLLLibraryProduct, d) == lp
+    # A product must be realized somehow
+    @test_throws ArgumentError JLLLibraryProduct(:libnothing)
+    # Static metadata still needs an archive to hang off of
+    @test_throws ArgumentError JLLLibraryProduct(:libz, "lib/libz.so.1", []; static_system_deps=["m"])
 
-    function make_csl_jll(products; deps = [])
-        return JLLInfo(;
-            name = "CompilerSupportLibraries",
-            version = v"1.0.5+1",
-            builds = [
-                JLLBuildInfo(;
-                    src_version = v"1.0.5+1",
-                    platform = Platform("x86_64", "linux"; libc = "glibc"),
-                    name = "CompilerSupportLibraries",
-                    artifact = JLLArtifactBinding(
-                        treehash = "0c6c284985577758b3a339c6215c9d4e3d71420e",
-                        download_sources = [],
-                    ),
-                    products,
-                    deps,
-                    licenses = [mit_license],
-                ),
-            ],
-        )
-    end
-
-    # Static dependency edges are held to the same coherence standard as dynamic ones
-    @test_throws ArgumentError make_csl_jll([
-        JLLLibraryProduct(:libgfortran, "lib/libgfortran.so.5", [];
-                          static_path = "lib/libgfortran.a",
-                          static_deps = [JLLLibraryDep(nothing, :libquadmath)]),
-    ])
-    @test_throws ArgumentError make_csl_jll([
-        JLLLibraryProduct(:libgfortran, "lib/libgfortran.so.5", [];
-                          static_path = "lib/libgfortran.a",
-                          static_deps = [JLLLibraryDep(:Zlib_jll, :libz)]),
-    ])
-
-    # A coherent JLL survives the full round-trip through `JLL.toml`, static and all
-    jll = make_csl_jll([
-        JLLLibraryProduct(:libquadmath, "lib/libquadmath.so.0", [];
-                          static_path = "lib/libquadmath.a"),
-        JLLLibraryProduct(:libgfortran, "lib/libgfortran.so.5", [];
-                          static_path = "lib/libgfortran.a",
-                          static_deps = [JLLLibraryDep(nothing, :libquadmath)],
-                          static_system_deps = ["m"],
-                          static_roots = ["_gfortrani_estr_write"]),
-    ])
-    d, new_jll = roundtrip_jll_through_toml(jll)
-    @test new_jll == jll
-    libgfortran = only([p for p in only(new_jll.builds).products if p.varname == :libgfortran])
-    @test libgfortran.static_path == "lib/libgfortran.a"
-    @test libgfortran.static_deps == [JLLLibraryDep(nothing, :libquadmath)]
-    @test libgfortran.static_system_deps == ["m"]
-    @test libgfortran.static_roots == ["_gfortrani_estr_write"]
-    # The static realization does not disturb the library identity machinery
-    @test libgfortran.dlid == JLLGenerator.uuid5(Base.UUID(new_jll), "libgfortran")
-end
-
-@testset "Archive-only library products" begin
-    # An archive-only product roundtrips, and declares its own identity
-    sp = JLLStaticLibraryProduct(:libfoo_a, "lib/libfoo.a";
-                                 deps = [JLLLibraryDep(nothing, :libbar)],
-                                 system_deps = ["m"],
-                                 roots = ["ctor"])
-    d = generate_toml_dict(sp)
-    @test d["type"] == "static_library"
-    @test d["path"] == "lib/libfoo.a"
-    @test d["deps"] == ["libbar"]
-    @test d["system_deps"] == ["m"]
-    @test d["roots"] == ["ctor"]
-    @test !haskey(d, "dlid")
-    @test parse_toml_dict(JLLStaticLibraryProduct, d) == sp
-    @test parse_toml_dict(AbstractJLLProduct, d) == sp
+    # `library_deps` spans every realization
+    @test library_deps(lp) == [JLLLibraryDep(nothing, :libquadmath)]
+    @test library_deps(static_only) == [JLLLibraryDep(nothing, :libz)]
 
     function make_jll(products)
         return JLLInfo(; name = "Demo", version = v"1.0.0", builds = [
@@ -602,145 +547,104 @@ end
         ])
     end
 
-    # Its dependency edges are held to the same coherence standard
+    # Both realizations' edges are held to the same coherence standard
     @test_throws ArgumentError make_jll([
-        JLLStaticLibraryProduct(:libfoo_a, "lib/libfoo.a"; deps = [JLLLibraryDep(nothing, :nope)]),
+        JLLLibraryProduct(:libfoo; static = JLLStaticRealization("lib/libfoo.a";
+                                                deps = [JLLLibraryDep(nothing, :nope)])),
     ])
     @test_throws ArgumentError make_jll([
-        JLLStaticLibraryProduct(:libfoo_a, "lib/libfoo.a"; deps = [JLLLibraryDep(:Zlib_jll, :libz)]),
+        JLLLibraryProduct(:libfoo, "lib/libfoo.so", [JLLLibraryDep(:Zlib_jll, :libz)]),
     ])
 
-    # It is assigned a stable identity just like a library product, and roundtrips
+    # An archive-only product gets a stable identity like any other library, and a
+    # library product may depend on it
     jll = make_jll([
-        JLLLibraryProduct(:libbar, "lib/libbar.so.1", []),
-        JLLStaticLibraryProduct(:libfoo_a, "lib/libfoo.a"; deps = [JLLLibraryDep(nothing, :libbar)]),
+        JLLLibraryProduct(:libfoo; static = JLLStaticRealization("lib/libfoo.a")),
+        JLLLibraryProduct(:libbar, "lib/libbar.so.1", [];
+                          static_path = "lib/libbar.a",
+                          static_deps = [JLLLibraryDep(nothing, :libfoo)]),
     ])
-    libfoo_a = only([p for p in only(jll.builds).products if p.varname == :libfoo_a])
-    @test libfoo_a.dlid == JLLGenerator.uuid5(Base.UUID(jll), "libfoo_a")
+    @test jll.products[:libfoo] == JLLGenerator.uuid5(Base.UUID(jll), "libfoo")
     _, new_jll = roundtrip_jll_through_toml(jll)
     @test new_jll == jll
-
-    # Only a JLL that actually contains one needs the newer wrapper
-    @test JLLGenerator.lazy_jll_wrappers_compat(jll) == "1.2.0"
-    @test JLLGenerator.lazy_jll_wrappers_compat(make_jll([
-        JLLLibraryProduct(:libbar, "lib/libbar.so.1", []),
-    ])) == "1.0.0"
 end
 
-@testset "JuliaLibrary.toml projection" begin
-    lib = JLLLibraryProduct(:libgfortran, "lib/libgfortran.so.5.0.0",
-                            [JLLLibraryDep(nothing, :libquadmath)];
-                            soname = "libgfortran.so.5",
-                            static_path = "lib/gcc/libgfortran.a",
-                            static_deps = [JLLLibraryDep(nothing, :libquadmath)],
-                            static_system_deps = ["c", "m"],
-                            static_roots = ["_gfortran_set_args"])
-    jll = JLLInfo(; name = "CSL", version = v"1.0.0", builds = [
-        JLLBuildInfo(;
-            src_version = v"1.0.0",
-            platform = Platform("x86_64", "linux"),
-            name = "CSL",
-            artifact = JLLArtifactBinding(
-                treehash = "0c6c284985577758b3a339c6215c9d4e3d71420e",
-                download_sources = [],
-            ),
-            products = [
-                JLLLibraryProduct(:libquadmath, "lib/libquadmath.so.0", []),
-                lib,
-                JLLStaticLibraryProduct(:libonly, "lib/libonly.a"; system_deps = ["c"]),
-                # Non-library products have no place in a library description
-                JLLExecutableProduct(:gfortran, "bin/gfortran"),
-            ],
-            licenses = [mit_license],
-        ),
-    ])
+@testset "Build location" begin
+    binding = JLLArtifactBinding(treehash = "0c6c284985577758b3a339c6215c9d4e3d71420e",
+                                 download_sources = [])
+    mkbuild(; kwargs...) = JLLBuildInfo(; src_version = v"1.0.0",
+                                        platform = Platform("x86_64", "linux"),
+                                        name = "Demo",
+                                        products = [JLLLibraryProduct(:libz, "lib/libz.so.1", [])],
+                                        licenses = [mit_license], kwargs...)
 
-    d = generate_julia_library_toml(jll)
-    @test d["library_format"] == "1.0"
-    @test d["package"]["name"] == "CSL_jll"
-    @test d["package"]["uuid"] == string(Base.UUID(jll))
+    # Anything we generate lives in an artifact, and says so
+    build = mkbuild(; artifact = binding)
+    @test build.location == "artifact"
+    @test generate_toml_dict(build)["location"] == "artifact"
 
-    products = d["products"]
-    # Executables are not libraries, so they do not appear
-    @test sort(collect(keys(products))) == ["libgfortran", "libonly", "libquadmath"]
+    # A hand-written record whose libraries ship with the package is `bundled`, and
+    # binds no artifact at all
+    bundled = mkbuild()
+    @test bundled.location == "bundled"
+    d = generate_toml_dict(bundled)
+    @test d["location"] == "bundled"
+    @test !haskey(d, "artifact")
 
-    gf = products["libgfortran"]
-    @test gf["artifact"] == "CSL"
-    # Every product says where its realizations live; BinaryBuilder always ships
-    # them in artifacts, and the consumer schema requires the key to be present.
-    @test gf["location"] == "artifact"
-    @test all(p["location"] == "artifact" for p in values(products))
-    @test gf["dlid"] == string(JLLGenerator.uuid5(Base.UUID(jll), "libgfortran"))
+    # The location and the binding must agree in both directions
+    @test_throws ArgumentError mkbuild(; location = "artifact")
+    @test_throws ArgumentError mkbuild(; artifact = binding, location = "bundled")
+    @test_throws ArgumentError mkbuild(; artifact = binding, location = "somewhere-else")
 
-    # Both realizations are present, and carry Artifacts.toml-style platform selectors
-    dyn = only(gf["dynamic"])
-    @test dyn["dlname"] == "libgfortran.so.5"
-    @test dyn["path"] == "lib/libgfortran.so.5.0.0"
-    @test dyn["deps"] == ["libquadmath"]
-    @test dyn["arch"] == "x86_64" && dyn["os"] == "linux" && dyn["libc"] == "glibc"
+    # ... and a bundled build cannot be generated into a package, since there is
+    # nothing to bind into `Artifacts.toml`
+    jll = JLLInfo(; name = "Demo", version = v"1.0.0", builds = [bundled])
+    mktempdir() do dir
+        @test_throws ArgumentError generate_jll(dir, jll)
+    end
 
-    stat = only(gf["static"])
-    @test stat["path"] == "lib/gcc/libgfortran.a"
-    @test stat["deps"] == ["libquadmath"]
-    @test stat["system_deps"] == ["c", "m"]
-    @test stat["roots"] == ["_gfortran_set_args"]
-    @test stat["arch"] == "x86_64"
+    # A bundled library is found by soname when it declares no path
+    r = parse_toml_dict(JLLDynamicRealization,
+                        Dict("soname" => "libz.so.1", "deps" => [], "flags" => String[]))
+    @test r.path == "libz.so.1"
+    @test r.soname == "libz.so.1"
+end
 
-    # A library with no archive has no `static` group at all...
-    @test !haskey(products["libquadmath"], "static")
-    @test length(products["libquadmath"]["dynamic"]) == 1
-
-    # ... and an archive-only library has no `dynamic` group, which is how a consumer
-    # knows that asking to `dlopen` it is an error rather than an oversight.
-    @test !haskey(products["libonly"], "dynamic")
-    @test only(products["libonly"]["static"])["path"] == "lib/libonly.a"
-    @test products["libonly"]["dlid"] == string(JLLGenerator.uuid5(Base.UUID(jll), "libonly"))
-
-    # Every product declares at least one realization
-    @test all(haskey(p, "dynamic") || haskey(p, "static") for p in values(products))
-
-    # A build for several platforms accumulates one entry per platform in each group
-    multi = JLLInfo(; name = "CSL", version = v"1.0.0", builds = [
-        JLLBuildInfo(; src_version = v"1.0.0", platform = p, name = "CSL",
+@testset "JLL.toml format marker" begin
+    jll = JLLInfo(; name = "Demo", version = v"1.0.0", builds = [
+        JLLBuildInfo(; src_version = v"1.0.0", platform = Platform("x86_64", "linux"),
+                     name = "Demo",
                      artifact = JLLArtifactBinding(
                         treehash = "0c6c284985577758b3a339c6215c9d4e3d71420e",
                         download_sources = []),
                      products = [JLLLibraryProduct(:libz, "lib/libz.so.1", [])],
-                     licenses = [mit_license])
-        for p in (Platform("x86_64", "linux"), Platform("aarch64", "macos"))
-    ])
-    entries = generate_julia_library_toml(multi)["products"]["libz"]["dynamic"]
-    @test length(entries) == 2
-    @test sort([e["os"] for e in entries]) == ["linux", "macos"]
-
-    # A JLL with no libraries at all gets no `JuliaLibrary.toml`
-    nolibs = JLLInfo(; name = "Tool", version = v"1.0.0", builds = [
-        JLLBuildInfo(; src_version = v"1.0.0", platform = Platform("x86_64", "linux"),
-                     name = "Tool",
-                     artifact = JLLArtifactBinding(
-                        treehash = "0c6c284985577758b3a339c6215c9d4e3d71420e",
-                        download_sources = []),
-                     products = [JLLExecutableProduct(:tool, "bin/tool")],
                      licenses = [mit_license])])
-    @test isempty(generate_julia_library_toml(nolibs)["products"])
-    mktempdir() do dir
-        generate_jll(dir, nolibs)
-        @test !isfile(joinpath(dir, "JuliaLibrary.toml"))
-    end
+    d = generate_toml_dict(jll)
+    # A string version, in the style of `manifest_format`
+    @test d["jll_format"] == "2.0"
+    @test d["jll_format"] isa String
+    @test parse_toml_dict(d) == jll
 
-    # ... whereas one that does provide libraries gets a parseable one on disk
+    # A record from before the format break is refused outright rather than misread
+    legacy = copy(d); delete!(legacy, "jll_format")
+    @test_throws ArgumentError parse_toml_dict(legacy)
+    # ... as is one from a future major version
+    future = copy(d); future["jll_format"] = "3.0"
+    @test_throws ArgumentError parse_toml_dict(future)
+    nonsense = copy(d); nonsense["jll_format"] = "not-a-version"
+    @test_throws ArgumentError parse_toml_dict(nonsense)
+
+    # Every generated JLL requires a wrapper that understands the v2 format
     mktempdir() do dir
         generate_jll(dir, jll)
-        @test isfile(joinpath(dir, "JuliaLibrary.toml"))
-        on_disk = TOML.parsefile(joinpath(dir, "JuliaLibrary.toml"))
-        @test on_disk["library_format"] == "1.0"
-        # A string version, parsed by consumers as a `VersionNumber`
-        @test on_disk["library_format"] isa String
-        @test VersionNumber(on_disk["library_format"]).major == 1
-        @test all(p["location"] == "artifact" for p in values(on_disk["products"]))
-        @test !haskey(on_disk["products"]["libonly"], "dynamic")
-        # A JLL containing an archive-only product requires the newer wrapper
-        @test TOML.parsefile(joinpath(dir, "Project.toml"))["compat"]["LazyJLLWrappers"] == "1.2.0"
+        on_disk = TOML.parsefile(joinpath(dir, "JLL.toml"))
+        @test on_disk["jll_format"] == "2.0"
+        # Products are keyed by name, so a name cannot be duplicated by construction
+        @test haskey(only(on_disk["builds"])["products"], "libz")
+        @test !haskey(only(on_disk["builds"])["products"]["libz"], "name")
+        @test TOML.parsefile(joinpath(dir, "Project.toml"))["compat"]["LazyJLLWrappers"] == "2.0.0"
+        # The projection is gone; JuliaC consumes `JLL.toml` directly now
+        @test !isfile(joinpath(dir, "JuliaLibrary.toml"))
     end
 end
 
@@ -866,7 +770,9 @@ end
 using BinaryBuilderSources, Base.BinaryPlatforms, Pkg
 using BinaryBuilderSources: PkgSpec
 @testset "JLLSource TOML loading" begin
-    # Use special Ncurses_jll.jl because we do not yet have any JLLs built in the wild that have a `JLL.toml`.
+    # `Ncurses_jll` was published before the v2 format, so its `JLL.toml` describes its
+    # library products in the old flat shape.  Loading it must fail loudly rather than
+    # silently misread every library path; it becomes readable again once regenerated.
     jll = JLLSource(PkgSpec(;
         name = "Ncurses_jll",
         uuid = "68e3532b-a499-55ff-9963-d1c0c0748b3a",
@@ -879,12 +785,6 @@ using BinaryBuilderSources: PkgSpec
 
     mktempdir() do prefix
         prepare(jll; depot=prefix, ignore_empty_registries=true)
-        data = parse_toml_dict(jll; depot=prefix)
-
-        @test data.name == "Ncurses"
-        for build in data.builds
-            @test build.name == "Ncurses"
-            @test length(build.products) == 4
-        end
+        @test_throws ArgumentError parse_toml_dict(jll; depot=prefix)
     end
 end

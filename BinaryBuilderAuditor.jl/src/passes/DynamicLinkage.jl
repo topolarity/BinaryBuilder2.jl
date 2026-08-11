@@ -8,7 +8,11 @@ function resolve_dynamic_links!(scan::ScanResult,
     dep_soname_map = Dict{String,Tuple{Symbol,Symbol}}()
     for (jll_name, libs) in dep_libs
         for lib in libs
-            dep_soname_map[basename(lib.soname)] = (Symbol(string(jll_name, "_jll")), lib.varname)
+            # A library with no shared realization can never satisfy a `DT_NEEDED`
+            if lib.dynamic === nothing
+                continue
+            end
+            dep_soname_map[basename(lib.dynamic.soname)] = (Symbol(string(jll_name, "_jll")), lib.varname)
         end
     end
 
@@ -147,7 +151,10 @@ function rpaths_consistent!(scan::ScanResult,
     soname_locator = copy(scan.soname_locator)
     for (_, libs) in dep_libs
         for lib in libs
-            soname_locator[basename(lib.soname)] = lib.path
+            if lib.dynamic === nothing
+                continue
+            end
+            soname_locator[basename(lib.dynamic.soname)] = lib.dynamic.path
         end
     end
 

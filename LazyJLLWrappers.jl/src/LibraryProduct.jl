@@ -1,9 +1,9 @@
 # TODO: Decide if this is the best thing to do, or if we should record it in the JLL.toml?
 function soname(product)
     if Sys.isapple()
-        return "@rpath/$(basename(product["path"]))"
+        return "@rpath/$(basename(product["dynamic"]["path"]))"
     else
-        return basename(product["path"])
+        return basename(product["dynamic"]["path"])
     end
 end
 
@@ -53,8 +53,8 @@ function library_product_definition(jb::JLLBlocks, artifact, product)
         push!(jb.top_level_blocks, emit_typed_global(
             var_name, LazyLibrary, lazy_library_expr(
                 lazy_path_var_name,
-                :(LazyJLLWrappers.filter_non_lazy_libraries([$(mod_dot_name.(product["deps"])...)])),
-                Expr(:call, :|, [Expr(:., :Libdl, QuoteNode(f)) for f in Symbol.(product["flags"])]...),
+                :(LazyJLLWrappers.filter_non_lazy_libraries([$(mod_dot_name.(product["dynamic"]["deps"])...)])),
+                Expr(:call, :|, [Expr(:., :Libdl, QuoteNode(f)) for f in Symbol.(product["dynamic"]["flags"])]...),
                 product,
                 # On Julia v1.13+, `LazyLibrary` can declare a stable identity
                 hasfield(LazyLibrary, :id),
@@ -71,8 +71,8 @@ function library_product_definition(jb::JLLBlocks, artifact, product)
         push!(jb.init_blocks, :(dlopen($(path_var_name))))
 
         # Also, invoke the callback function in `__init__()` here.
-        if haskey(product, "on_load_callback")
-            push!(jb.init_blocks, :($(Symbol(product["on_load_callback"]))()))
+        if haskey(product["dynamic"], "on_load_callback")
+            push!(jb.init_blocks, :($(Symbol(product["dynamic"]["on_load_callback"]))()))
         end
 
         if VERSION >= v"1.6.0"

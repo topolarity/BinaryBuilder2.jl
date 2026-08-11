@@ -6,10 +6,10 @@ import Base: UUID
 
 export JLLInfo, JLLBuildInfo, JLLSourceRecord, JLLArtifactSource, JLLLibraryDep,
        AbstractJLLProduct, JLLExecutableProduct, JLLFileProduct, JLLLibraryProduct,
-       JLLStaticLibraryProduct,
        JLLPackageDependency, JLLArtifactBinding, AbstractProducts, JLLBuildLicense,
-       generate_jll, generate_toml_dict, parse_toml_dict, has_static_realization,
-       generate_julia_library_toml
+       generate_jll, generate_toml_dict, parse_toml_dict, jll_format_version,
+       has_static_realization, has_dynamic_realization, library_deps,
+       JLLDynamicRealization, JLLStaticRealization
 
 include("RTLD_flags.jl")
 include("PkgCompatHacks.jl")
@@ -34,13 +34,12 @@ end
 function generate_toml_dict(ep::JLLExecutableProduct)
     return Dict(
         "type" => "executable",
-        "name" => string(ep.varname),
         "path" => ep.path,
     )
 end
-function parse_toml_dict(::Type{JLLExecutableProduct}, d)
+function parse_toml_dict(::Type{JLLExecutableProduct}, varname, d)
     return JLLExecutableProduct(
-        Symbol(d["name"]),
+        Symbol(varname),
         d["path"],
     )
 end
@@ -53,13 +52,12 @@ end
 function generate_toml_dict(fp::JLLFileProduct)
     return Dict(
         "type" => "file",
-        "name" => string(fp.varname),
         "path" => fp.path,
     )
 end
-function parse_toml_dict(::Type{JLLFileProduct}, d)
+function parse_toml_dict(::Type{JLLFileProduct}, varname, d)
     return JLLFileProduct(
-        Symbol(d["name"]),
+        Symbol(varname),
         d["path"],
     )
 end
@@ -102,175 +100,215 @@ function parse_toml_dict(::Type{JLLLibraryDep}, s)
     end
 end
 
-@struct_hash_equal struct JLLLibraryProduct <: AbstractJLLProduct
-    varname::Symbol
+"""
+    JLLDynamicRealization
+
+The shared-library realization of a library product: what to load, what it loads in
+turn, and how.
+"""
+@struct_hash_equal struct JLLDynamicRealization
     path::String
-    deps::Vector{JLLLibraryDep}
     soname::String
+    deps::Vector{JLLLibraryDep}
     flags::Vector{Symbol}
     on_load_callback::Union{Nothing,Symbol}
-    # Stable library identity, typically `uuid5(pkg_uuid, string(varname))`;
-    # filled in automatically when assembling a `JLLInfo` if left as `nothing`.
-    dlid::Union{Nothing,UUID}
 
-    # A library can also have a static realization; when it does, `static_path` gives
-    # the artifact-relative path of the archive, and the remaining `static_*` fields
-    # describe what must be linked alongside it.  `static_deps` are edges onto other
-    # JLL libraries (exactly like `deps`), `static_system_deps` are bare system library
-    # names (e.g. `"m"`, `"pthread"`, without any `-l` prefix) that the system provides,
-    # and `static_roots` names symbols that must be kept alive when linking the archive
-    # (e.g. the constructors that would have run when loading the shared library).
-    static_path::Union{Nothing,String}
-    static_deps::Vector{JLLLibraryDep}
-    static_system_deps::Vector{String}
-    static_roots::Vector{String}
-
-    function JLLLibraryProduct(varname, path, deps;
-                               flags = rtld_symbols(default_rtld_flags),
-                               soname = basename(path),
-                               on_load_callback = nothing,
-                               dlid = nothing,
-                               static_path = nothing,
-                               static_deps = JLLLibraryDep[],
-                               static_system_deps = String[],
-                               static_roots = String[])
+    function JLLDynamicRealization(path;
+                                   soname = basename(path),
+                                   deps = JLLLibraryDep[],
+                                   flags = rtld_symbols(default_rtld_flags),
+                                   on_load_callback = nothing)
         if isa(flags, UInt32)
             flags = rtld_symbols(flags)
         end
-        if static_path === nothing && (!isempty(static_deps) || !isempty(static_system_deps) || !isempty(static_roots))
-            throw(ArgumentError("Library product '$(varname)' declares static metadata without a `static_path`!"))
-        end
-        return new(varname, path, deps, soname, flags, on_load_callback, dlid,
-                   static_path === nothing ? nothing : String(static_path),
-                   empty_convert(JLLLibraryDep, static_deps),
-                   empty_convert(String, String[string(d) for d in static_system_deps]),
-                   empty_convert(String, String[string(r) for r in static_roots]))
+        return new(String(path), String(soname), empty_convert(JLLLibraryDep, deps),
+                   Symbol[Symbol(f) for f in flags], on_load_callback)
     end
+end
+
+function generate_toml_dict(r::JLLDynamicRealization)
+    d = Dict{String,Any}(
+        "path" => r.path,
+        "soname" => r.soname,
+        "deps" => generate_toml_dict.(r.deps),
+        "flags" => string.(r.flags),
+    )
+    if r.on_load_callback !== nothing
+        d["on_load_callback"] = string(r.on_load_callback)
+    end
+    return d
+end
+function parse_toml_dict(::Type{JLLDynamicRealization}, d)
+    # `path` is optional and defaults to the soname: a bundled library is found by
+    # name in the private shlibdir, rather than at a path within an artifact.
+    return JLLDynamicRealization(
+        get(d, "path", d["soname"]);
+        soname = d["soname"],
+        deps = [parse_toml_dict(JLLLibraryDep, dep) for dep in d["deps"]],
+        flags = Symbol.(d["flags"]),
+        on_load_callback = haskey(d, "on_load_callback") ? Symbol(d["on_load_callback"]) : nothing,
+    )
+end
+
+"""
+    JLLStaticRealization
+
+The static-archive realization of a library product.  `deps` are edges onto other JLL
+libraries, exactly as for the dynamic realization; `system_deps` are bare system
+library names (`"m"`, `"pthread"`, with no `-l` prefix) that the system provides; and
+`roots` names symbols that must be kept alive when linking the archive, such as the
+constructors that would have run when loading the shared library.
+"""
+@struct_hash_equal struct JLLStaticRealization
+    path::String
+    deps::Vector{JLLLibraryDep}
+    system_deps::Vector{String}
+    roots::Vector{String}
+
+    function JLLStaticRealization(path;
+                                  deps = JLLLibraryDep[],
+                                  system_deps = String[],
+                                  roots = String[])
+        return new(String(path), empty_convert(JLLLibraryDep, deps),
+                   empty_convert(String, String[string(d) for d in system_deps]),
+                   empty_convert(String, String[string(r) for r in roots]))
+    end
+end
+
+function generate_toml_dict(r::JLLStaticRealization)
+    return Dict{String,Any}(
+        "path" => r.path,
+        "deps" => generate_toml_dict.(r.deps),
+        "system_deps" => r.system_deps,
+        "roots" => r.roots,
+    )
+end
+function parse_toml_dict(::Type{JLLStaticRealization}, d)
+    return JLLStaticRealization(
+        d["path"];
+        deps = [parse_toml_dict(JLLLibraryDep, dep) for dep in get(d, "deps", String[])],
+        system_deps = String[string(sd) for sd in get(d, "system_deps", String[])],
+        roots = String[string(r) for r in get(d, "roots", String[])],
+    )
+end
+
+"""
+    JLLLibraryProduct
+
+A library a JLL provides, identified by its `varname` and its stable `dlid`, and
+realized in one or both of two ways: as a shared library that can be loaded, and as a
+static archive that can be linked.  A product must declare at least one realization;
+which ones it declares is exactly what tells a consumer how the library may be used.
+"""
+@struct_hash_equal struct JLLLibraryProduct <: AbstractJLLProduct
+    varname::Symbol
+    dynamic::Union{Nothing,JLLDynamicRealization}
+    static::Union{Nothing,JLLStaticRealization}
+
+    function JLLLibraryProduct(varname::Symbol,
+                               dynamic::Union{Nothing,JLLDynamicRealization},
+                               static::Union{Nothing,JLLStaticRealization})
+        if dynamic === nothing && static === nothing
+            throw(ArgumentError("Library product '$(varname)' declares no realizations; it must have a dynamic realization, a static one, or both"))
+        end
+        return new(varname, dynamic, static)
+    end
+end
+
+"""
+    JLLLibraryProduct(varname; dynamic, static)
+
+Declare a library product directly from its realizations.  A library's identity is
+stated once for the whole JLL, in `JLLInfo`, rather than repeated in every build.
+"""
+function JLLLibraryProduct(varname; dynamic = nothing, static = nothing)
+    return JLLLibraryProduct(Symbol(varname), dynamic, static)
+end
+
+"""
+    JLLLibraryProduct(varname, path, deps; kwargs...)
+
+Convenience constructor for the common case of a library that has a shared-library
+realization, optionally accompanied by a static one.
+"""
+function JLLLibraryProduct(varname, path, deps;
+                           flags = rtld_symbols(default_rtld_flags),
+                           soname = basename(path),
+                           on_load_callback = nothing,
+                           static_path = nothing,
+                           static_deps = JLLLibraryDep[],
+                           static_system_deps = String[],
+                           static_roots = String[])
+    if static_path === nothing && (!isempty(static_deps) || !isempty(static_system_deps) || !isempty(static_roots))
+        throw(ArgumentError("Library product '$(varname)' declares static metadata without a `static_path`!"))
+    end
+    static = static_path === nothing ? nothing :
+        JLLStaticRealization(static_path; deps=static_deps, system_deps=static_system_deps, roots=static_roots)
+    return JLLLibraryProduct(
+        Symbol(varname),
+        JLLDynamicRealization(path; soname, deps, flags, on_load_callback),
+        static,
+    )
 end
 
 """
     has_static_realization(lp::JLLLibraryProduct)
 
-Returns `true` if this library product also ships a static archive.
+Returns `true` if this library ships a static archive.
 """
-has_static_realization(lp::JLLLibraryProduct) = lp.static_path !== nothing
+has_static_realization(lp::JLLLibraryProduct) = lp.static !== nothing
+
+"""
+    has_dynamic_realization(lp::JLLLibraryProduct)
+
+Returns `true` if this library ships a shared library that can be loaded.
+"""
+has_dynamic_realization(lp::JLLLibraryProduct) = lp.dynamic !== nothing
+
+"""
+    library_deps(lp::JLLLibraryProduct)
+
+Every library this product depends on, across all of its realizations.
+"""
+function library_deps(lp::JLLLibraryProduct)
+    deps = JLLLibraryDep[]
+    if lp.dynamic !== nothing
+        append!(deps, lp.dynamic.deps)
+    end
+    if lp.static !== nothing
+        append!(deps, lp.static.deps)
+    end
+    return unique(deps)
+end
 
 function generate_toml_dict(lp::JLLLibraryProduct)
-    d = Dict(
+    d = Dict{String,Any}(
         "type" => "library",
-        "name" => string(lp.varname),
-        "path" => lp.path,
-        "deps" => generate_toml_dict.(lp.deps),
-        "soname" => lp.soname,
-        "flags" => string.(lp.flags),
     )
-    if lp.on_load_callback !== nothing
-        d["on_load_callback"] = string(lp.on_load_callback)
+    if lp.dynamic !== nothing
+        d["dynamic"] = generate_toml_dict(lp.dynamic)
     end
-    if lp.dlid !== nothing
-        d["dlid"] = string(lp.dlid)
-    end
-    # Static metadata is emitted only when there actually is a static realization,
-    # so that JLLs without one are byte-for-byte unchanged.
-    if lp.static_path !== nothing
-        d["static_path"] = lp.static_path
-        d["static_deps"] = generate_toml_dict.(lp.static_deps)
-        d["static_system_deps"] = lp.static_system_deps
-        d["static_roots"] = lp.static_roots
+    if lp.static !== nothing
+        d["static"] = generate_toml_dict(lp.static)
     end
     return d
 end
-function parse_toml_dict(::Type{JLLLibraryProduct}, d)
-    on_load_callback = nothing
-    if haskey(d, "on_load_callback")
-        on_load_callback = Symbol(d["on_load_callback"])
-    end
-    dlid = nothing
-    if haskey(d, "dlid")
-        dlid = UUID(d["dlid"])
-    end
-    static_path = get(d, "static_path", nothing)
+function parse_toml_dict(::Type{JLLLibraryProduct}, varname, d)
     return JLLLibraryProduct(
-        Symbol(d["name"]),
-        d["path"],
-        [parse_toml_dict(JLLLibraryDep, d) for d in d["deps"]];
-        soname = d["soname"],
-        flags = Symbol.(d["flags"]),
-        on_load_callback,
-        dlid,
-        static_path,
-        static_deps = [parse_toml_dict(JLLLibraryDep, sd) for sd in get(d, "static_deps", String[])],
-        static_system_deps = String[string(sd) for sd in get(d, "static_system_deps", String[])],
-        static_roots = String[string(r) for r in get(d, "static_roots", String[])],
+        Symbol(varname),
+        haskey(d, "dynamic") ? parse_toml_dict(JLLDynamicRealization, d["dynamic"]) : nothing,
+        haskey(d, "static") ? parse_toml_dict(JLLStaticRealization, d["static"]) : nothing,
     )
 end
 
 
-"""
-    JLLStaticLibraryProduct
-
-A library whose only realization is a static archive.  It carries the same
-description of what must be linked alongside it as the `static_*` fields of a
-`JLLLibraryProduct`, but as the product's sole realization: there is no shared
-library to load, so it has no `soname` and no `dlopen` flags.  It still declares
-a `dlid`, since it remains a library with a stable identity that a static link
-can be asked to provide.
-"""
-@struct_hash_equal struct JLLStaticLibraryProduct <: AbstractJLLProduct
-    varname::Symbol
-    path::String
-    deps::Vector{JLLLibraryDep}
-    system_deps::Vector{String}
-    roots::Vector{String}
-    dlid::Union{Nothing,UUID}
-
-    function JLLStaticLibraryProduct(varname, path;
-                                     deps = JLLLibraryDep[],
-                                     system_deps = String[],
-                                     roots = String[],
-                                     dlid = nothing)
-        return new(Symbol(varname), String(path),
-                   empty_convert(JLLLibraryDep, deps),
-                   empty_convert(String, String[string(d) for d in system_deps]),
-                   empty_convert(String, String[string(r) for r in roots]),
-                   dlid)
-    end
-end
-
-function generate_toml_dict(sp::JLLStaticLibraryProduct)
-    d = Dict(
-        "type" => "static_library",
-        "name" => string(sp.varname),
-        "path" => sp.path,
-        "deps" => generate_toml_dict.(sp.deps),
-        "system_deps" => sp.system_deps,
-        "roots" => sp.roots,
-    )
-    if sp.dlid !== nothing
-        d["dlid"] = string(sp.dlid)
-    end
-    return d
-end
-function parse_toml_dict(::Type{JLLStaticLibraryProduct}, d)
-    return JLLStaticLibraryProduct(
-        Symbol(d["name"]),
-        d["path"];
-        deps = [parse_toml_dict(JLLLibraryDep, dep) for dep in get(d, "deps", String[])],
-        system_deps = String[string(sd) for sd in get(d, "system_deps", String[])],
-        roots = String[string(r) for r in get(d, "roots", String[])],
-        dlid = haskey(d, "dlid") ? UUID(d["dlid"]) : nothing,
-    )
-end
-
-function parse_toml_dict(::Type{AbstractJLLProduct}, d)
+function parse_toml_dict(::Type{AbstractJLLProduct}, varname, d)
     if d["type"] == "executable"
-        return parse_toml_dict(JLLExecutableProduct, d)
+        return parse_toml_dict(JLLExecutableProduct, varname, d)
     elseif d["type"] == "file"
-        return parse_toml_dict(JLLFileProduct, d)
+        return parse_toml_dict(JLLFileProduct, varname, d)
     elseif d["type"] == "library"
-        return parse_toml_dict(JLLLibraryProduct, d)
-    elseif d["type"] == "static_library"
-        return parse_toml_dict(JLLStaticLibraryProduct, d)
+        return parse_toml_dict(JLLLibraryProduct, varname, d)
     else
         throw(ArgumentError("Unknown JLL product type '$(d["type"])'"))
     end
@@ -486,9 +524,15 @@ easier for non-BinaryBuilder2 users to make use of this package if needed.
     # The platform this is built for
     platform::AbstractPlatform
 
+    # Where this build's files live.  `"artifact"` means they are inside the artifact
+    # bound below; `"bundled"` means they ship with the package itself, and paths
+    # resolve against the private shlibdir.  The two are spelled out rather than
+    # inferred from the presence of a binding, so that a reader never has to guess.
+    location::String
+
     # The name and artifact bindings for this artifact
     name::String
-    artifact::JLLArtifactBinding
+    artifact::Union{Nothing,JLLArtifactBinding}
     auxilliary_artifacts::Dict{String,JLLArtifactBinding}
 
     # List of products in cut-down JLL format
@@ -514,17 +558,28 @@ easier for non-BinaryBuilder2 users to make use of this package if needed.
     init_def::Union{Nothing,String}
 
     function JLLBuildInfo(src_version, platform, name, artifact, auxilliary_artifacts, products,
-                          deps, sources, licenses, lazy, callback_defs, init_def)
+                          deps, sources, licenses, lazy, callback_defs, init_def,
+                          location = "artifact")
+        location = string(location)
+        if location ∉ ("artifact", "bundled")
+            throw(ArgumentError("Invalid build location '$(location)'; expected \"artifact\" or \"bundled\""))
+        end
+        # The location and the binding must agree: an artifact build is nothing without
+        # the artifact it names, and a bundled build has no artifact to name.
+        if location == "artifact" && artifact === nothing
+            throw(ArgumentError("Build '$(name)' declares `location = \"artifact\"` but binds no artifact!"))
+        end
+        if location == "bundled" && artifact !== nothing
+            throw(ArgumentError("Build '$(name)' declares `location = \"bundled\"` but also binds an artifact!"))
+        end
         # Quick verification of dependency structure, to ensure we're not incoherent.
         for p in products
-            if isa(p, JLLLibraryProduct) || isa(p, JLLStaticLibraryProduct)
-                # Static dependency edges are checked for coherence just like dynamic ones.
-                edges = isa(p, JLLStaticLibraryProduct) ?
-                    ((d, "statically depends") for d in p.deps) :
-                    Iterators.flatten((
-                        ((d, "depends") for d in p.deps),
-                        ((d, "statically depends") for d in p.static_deps),
-                    ))
+            if isa(p, JLLLibraryProduct)
+                # Every realization's edges are held to the same standard.
+                edges = Iterators.flatten((
+                    ((d, "depends") for d in (p.dynamic === nothing ? JLLLibraryDep[] : p.dynamic.deps)),
+                    ((d, "statically depends") for d in (p.static === nothing ? JLLLibraryDep[] : p.static.deps)),
+                ))
                 for (d, kind) in edges
                     # A "nothing" module means it's an intra-package dependency
                     if d.mod === nothing
@@ -540,9 +595,9 @@ easier for non-BinaryBuilder2 users to make use of this package if needed.
                     end
                 end
 
-                if isa(p, JLLLibraryProduct) && p.on_load_callback !== nothing
-                    if p.on_load_callback ∉ keys(callback_defs)
-                        throw(ArgumentError("Product '$(p.varname)' references on-load callback '$(p.on_load_callback)', but matching definition not found!"))
+                if p.dynamic !== nothing && p.dynamic.on_load_callback !== nothing
+                    if p.dynamic.on_load_callback ∉ keys(callback_defs)
+                        throw(ArgumentError("Product '$(p.varname)' references on-load callback '$(p.dynamic.on_load_callback)', but matching definition not found!"))
                     end
                 end
             end
@@ -555,10 +610,13 @@ easier for non-BinaryBuilder2 users to make use of this package if needed.
         return new(
             string(src_version),
             platform,
+            location,
             string(name),
             artifact,
             Dict{String,JLLArtifactBinding}(String(name) => art for (name, art) in auxilliary_artifacts),
-            empty_convert(AbstractJLLProduct, products),
+            # Products are keyed by name in the record, so their order carries no
+            # meaning; keep them sorted so that equality and output are deterministic.
+            sort(empty_convert(AbstractJLLProduct, products); by = p -> string(p.varname)),
             empty_convert(JLLPackageDependency, deps),
             empty_convert(JLLSourceRecord, sources),
             licenses,
@@ -569,27 +627,31 @@ easier for non-BinaryBuilder2 users to make use of this package if needed.
     end
 end
 
-function JLLBuildInfo(;src_version, platform, name, artifact, products, licenses,
+function JLLBuildInfo(;src_version, platform, name, artifact = nothing, products, licenses,
                           deps = [], sources = [], lazy = false, callback_defs = Dict(),
-                          init_def = nothing, auxilliary_artifacts = Dict())
+                          init_def = nothing, auxilliary_artifacts = Dict(),
+                          location = artifact === nothing ? "bundled" : "artifact")
     return JLLBuildInfo(src_version, platform, name, artifact, auxilliary_artifacts, products,
-                           deps, sources, licenses, lazy, callback_defs, init_def)
+                           deps, sources, licenses, lazy, callback_defs, init_def, location)
 end
 
 function generate_toml_dict(info::JLLBuildInfo)
     d = Dict(
+        "location" => info.location,
         "src_version" => info.src_version,
         "deps" => generate_toml_dict.(info.deps),
         "sources" => generate_toml_dict.(info.sources),
         "licenses" => generate_toml_dict.(info.licenses),
         "platform" => triplet(info.platform),
         "name" => string(info.name),
-        "artifact" => generate_toml_dict(info.artifact),
         "auxilliary_artifacts" => Dict(string(name) => generate_toml_dict(art) for (name, art) in info.auxilliary_artifacts),
         "lazy" => string(info.lazy),
         "callback_defs" => Dict(string(k) => v for (k, v) in info.callback_defs),
-        "products" => generate_toml_dict.(info.products),
+        "products" => Dict(string(p.varname) => generate_toml_dict(p) for p in info.products),
     )
+    if info.artifact !== nothing
+        d["artifact"] = generate_toml_dict(info.artifact)
+    end
     if info.init_def !== nothing
         d["init_def"] = info.init_def
     end
@@ -604,12 +666,13 @@ function parse_toml_dict(::Type{JLLBuildInfo}, d::Dict)
         licenses = parse_toml_dict.(JLLBuildLicense, d["licenses"]),
         platform = parse(AbstractPlatform, d["platform"]),
         name = d["name"],
-        artifact = parse_toml_dict(JLLArtifactBinding, d["artifact"]),
+        artifact = haskey(d, "artifact") ? parse_toml_dict(JLLArtifactBinding, d["artifact"]) : nothing,
+        location = get(d, "location", haskey(d, "artifact") ? "artifact" : "bundled"),
         auxilliary_artifacts = Dict(name => parse_toml_dict(JLLArtifactBinding, art) for (name, art) in d["auxilliary_artifacts"]),
         lazy = parse(Bool, d["lazy"]),
         callback_defs = Dict{Symbol,String}(Symbol(k) => string(v) for (k,v) in d["callback_defs"]),
         init_def = get(d, "init_def", nothing),
-        products = [parse_toml_dict(AbstractJLLProduct, p) for p in d["products"]],
+        products = AbstractJLLProduct[parse_toml_dict(AbstractJLLProduct, name, p) for (name, p) in d["products"]],
     )
 end
 
@@ -633,41 +696,24 @@ function guess_julia_compat(artifacts)
 end
 
 """
-    populate_dlids(build::JLLBuildInfo, pkg_uuid::UUID)
+    product_identities(builds, pkg_uuid)
 
-Return a `JLLBuildInfo` where every library product declares a stable library
-identity (`dlid`).  Products that do not already declare one are assigned
-`uuid5(pkg_uuid, string(varname))`, namespacing the identity under the JLL
-package's UUID so that it is stable across rebuilds and versions of the JLL.
+The stable identity of every library the JLL provides, stated once for the whole
+package rather than repeated in each build: identity is a property of the library, not
+of any one platform's realization of it.  Each is `uuid5(pkg_uuid, varname)`,
+namespaced under the JLL package's UUID so that it is stable across rebuilds and
+versions.
 """
-function populate_dlids(build::JLLBuildInfo, pkg_uuid::UUID)
-    declares_dlid(p) = !isa(p, JLLLibraryProduct) && !isa(p, JLLStaticLibraryProduct)
-    if all(declares_dlid(p) || p.dlid !== nothing for p in build.products)
-        return build
-    end
-    products = map(build.products) do p
-        if isa(p, JLLStaticLibraryProduct) && p.dlid === nothing
-            p = JLLStaticLibraryProduct(p.varname, p.path;
-                                        deps = p.deps,
-                                        system_deps = p.system_deps,
-                                        roots = p.roots,
-                                        dlid = uuid5(pkg_uuid, string(p.varname)))
-        elseif isa(p, JLLLibraryProduct) && p.dlid === nothing
-            p = JLLLibraryProduct(p.varname, p.path, p.deps;
-                                  soname = p.soname,
-                                  flags = p.flags,
-                                  on_load_callback = p.on_load_callback,
-                                  dlid = uuid5(pkg_uuid, string(p.varname)),
-                                  static_path = p.static_path,
-                                  static_deps = p.static_deps,
-                                  static_system_deps = p.static_system_deps,
-                                  static_roots = p.static_roots)
+function product_identities(builds, pkg_uuid::UUID)
+    identities = Dict{Symbol,UUID}()
+    for build in builds
+        for p in build.products
+            if isa(p, JLLLibraryProduct)
+                identities[p.varname] = uuid5(pkg_uuid, string(p.varname))
+            end
         end
-        return p
     end
-    return JLLBuildInfo(build.src_version, build.platform, build.name, build.artifact,
-                        build.auxilliary_artifacts, products, build.deps, build.sources,
-                        build.licenses, build.lazy, build.callback_defs, build.init_def)
+    return identities
 end
 
 """
@@ -699,25 +745,43 @@ JLL is stored within, including sources
     # but we still do our best to support older julia versions.
     julia_compat::String
 
-    function JLLInfo(name, version, artifacts, platform_augmentation_code, julia_compat)
+    # The stable identity of each library this JLL provides, keyed by varname.  Stated
+    # once here rather than in every build, since a library's identity does not vary by
+    # platform.
+    products::Dict{Symbol,UUID}
+
+    function JLLInfo(name, version, artifacts, platform_augmentation_code, julia_compat,
+                     products = nothing)
         name = string(name)
-        # Now that the JLL package's UUID is known, fill in stable library
-        # identities for any library products that do not declare one.
+        # Now that the JLL package's UUID is known, we can name every library
         pkg_uuid = jll_package_uuid(name)
-        artifacts = JLLBuildInfo[populate_dlids(build, pkg_uuid) for build in artifacts]
+        if products === nothing
+            products = product_identities(artifacts, pkg_uuid)
+        end
+        products = Dict{Symbol,UUID}(Symbol(k) => UUID(v) for (k, v) in products)
+        # Every library realized by any build must be named
+        for build in artifacts
+            for p in build.products
+                if isa(p, JLLLibraryProduct) && !haskey(products, p.varname)
+                    throw(ArgumentError("Library '$(p.varname)' is realized by build '$(build.name)' but has no identity in the top-level `products` table!"))
+                end
+            end
+        end
         return new(
             name,
             VersionNumber(version),
             artifacts,
             string(platform_augmentation_code),
             julia_compat,
+            products,
         )
     end
 end
 function JLLInfo(;name, version, builds,
                   platform_augmentation_code = "",
-                  julia_compat = guess_julia_compat(builds))
-    return JLLInfo(name, version, builds, platform_augmentation_code, julia_compat)
+                  julia_compat = guess_julia_compat(builds),
+                  products = nothing)
+    return JLLInfo(name, version, builds, platform_augmentation_code, julia_compat, products)
 end
 
 function Base.BinaryPlatforms.select_platform(jll::JLLInfo, platform::AbstractPlatform = HostPlatform())
@@ -762,8 +826,22 @@ jll_package_uuid(name::AbstractString) = jll_specific_uuid5(uuid_package, "$(nam
 UUID(info::JLLInfo) = jll_package_uuid(info.name)
 
 
+"""
+    jll_format_version
+
+The version of the `JLL.toml` format this package writes.  A reader must refuse a
+record whose major version it does not know rather than guessing: v2 moved every
+library product's realizations into `dynamic`/`static` sub-tables, so v1 and v2
+records disagree about where a library's path lives.
+"""
+const jll_format_version = v"2.0.0"
+
 function generate_toml_dict(info::JLLInfo)
     return Dict(
+        "jll_format" => string(jll_format_version.major, ".", jll_format_version.minor),
+        # Library identity is stated once for the whole package, not per build
+        "products" => Dict(string(varname) => Dict("dlid" => string(dlid))
+                           for (varname, dlid) in info.products),
         "name" => info.name,
         "version" => string(info.version),
         "builds" => generate_toml_dict.(info.builds),
@@ -773,14 +851,42 @@ function generate_toml_dict(info::JLLInfo)
 end
 
 function parse_toml_dict(::Type{JLLInfo}, d::Dict)
+    check_jll_format(d)
     return JLLInfo(;
         name = d["name"],
         version = VersionNumber(d["version"]),
         builds = [parse_toml_dict(JLLBuildInfo, p) for p in d["builds"]],
         platform_augmentation_code = d["platform_augmentation_code"],
         julia_compat = d["julia_compat"],
+        products = Dict(Symbol(name) => UUID(p["dlid"]) for (name, p) in get(d, "products", Dict())),
     )
 end
+"""
+    check_jll_format(d::Dict)
+
+Refuse a `JLL.toml` this version cannot read.  A record with no `jll_format` marker
+predates the realization-group format and describes its library products in a shape we
+no longer understand, so it is rejected outright rather than misread.
+"""
+function check_jll_format(d::Dict)
+    if !haskey(d, "jll_format")
+        throw(ArgumentError(
+            "This `JLL.toml` declares no `jll_format`, so it predates v$(jll_format_version.major).0 and " *
+            "describes its library products in the older flat shape.  It must be regenerated."))
+    end
+    format = try
+        VersionNumber(d["jll_format"])
+    catch
+        throw(ArgumentError("Invalid `jll_format` value $(repr(d["jll_format"])); expected a version string such as \"2.0\""))
+    end
+    if format.major != jll_format_version.major
+        throw(ArgumentError(
+            "This `JLL.toml` declares `jll_format = \"$(d["jll_format"])\"`, but this version of " *
+            "JLLGenerator reads v$(jll_format_version.major) records."))
+    end
+    return format
+end
+
 parse_toml_dict(d::Dict) = parse_toml_dict(JLLInfo, d)
 
 function bind_jll_artifact!(artifacts_toml_path::String, name::String, platform::AbstractPlatform,
@@ -819,133 +925,6 @@ function coalesce_licenses(info::JLLInfo)
     return ret
 end
 
-"""
-    lazy_jll_wrappers_compat(info::JLLInfo)
-
-The lowest `LazyJLLWrappers` version able to read this JLL.  Only the archive-only
-product type needs a newer wrapper, so everything else keeps the original floor.
-"""
-function lazy_jll_wrappers_compat(info::JLLInfo)
-    for build in info.builds
-        if any(isa(p, JLLStaticLibraryProduct) for p in build.products)
-            return "1.2.0"
-        end
-    end
-    return "1.0.0"
-end
-
-
-"""
-    generate_julia_library_toml(info::JLLInfo)
-
-Project a `JLLInfo` into the `JuliaLibrary.toml` schema, which is the consumer-facing
-description of the libraries a package provides and how to link against them.  Where
-`JLL.toml` is BinaryBuilder's own internal record of an entire build, this is a
-narrow, symmetric statement about libraries only.
-
-Each library product becomes a `[products.X]` table carrying its platform-invariant
-identity (`dlid`), where its realizations are to be found (`location`, always
-`"artifact"` here, plus the name of the artifact carrying them), and one
-realization group per way the library can be consumed: `[[products.X.dynamic]]`
-entries for the shared library and `[[products.X.static]]` entries for the archive.
-Entries carry Artifacts.toml-style platform selectors, so a consumer resolves them
-with the same `select_platform` it already uses; an entry with no selectors matches
-any platform.
-
-A library that ships only an archive simply has no `dynamic` group, which is how a
-consumer knows that asking to `dlopen` it is an error rather than an oversight.
-"""
-# INVARIANT: carrying the platform selectors *inline*, on each realization entry, is a
-# stopgap.  It is only sound while nothing consumes the records of published registry
-# JLLs, and published JLLs will require the artifact-backed form instead.
-#
-# The reason is selection coherence.  A JLL whose artifacts are chosen by an augmented
-# platform -- libgfortran and cxxstring ABI expansion, say -- runs Pkg's augment hooks
-# when it picks the artifact.  A consumer that runs its own `select_platform` over the
-# inline entries here does not run those hooks, so the two selections can disagree, and
-# the realization we describe need not be the one that was actually installed.  There
-# is no way to close that gap while the two selections are independent.
-#
-# The artifact-backed form is coherent by construction, because a single selection
-# resolves the artifact and its metadata together.  Switching to it means moving the
-# per-entry platform selectors out of here and into `products` sub-tables on the
-# `Artifacts.toml` entries that `generate_jll` already writes, leaving this file with
-# only platform-invariant data.  Note when doing so that nothing of ours may appear as
-# a String key at an entry's top level: `unpack_platform` lifts those into platform
-# tags, so they would silently corrupt artifact matching.  A sub-table is invisible to
-# it, which is why the metadata has to live in one.
-function generate_julia_library_toml(info::JLLInfo)
-    products = Dict{String,Any}()
-
-    function product_table(varname::Symbol, dlid, artifact_name::String)
-        name = string(varname)
-        if !haskey(products, name)
-            # Everything BinaryBuilder generates ships its libraries in artifacts,
-            # rather than bundled alongside the package itself.
-            d = Dict{String,Any}("location" => "artifact", "artifact" => artifact_name)
-            if dlid !== nothing
-                d["dlid"] = string(dlid)
-            end
-            products[name] = d
-        end
-        return products[name]
-    end
-
-    # Platform selectors, spelled exactly as `Artifacts.toml` spells them.  An
-    # `AnyPlatform` build gets none at all, which reads as a wildcard.
-    function platform_selectors(platform::AbstractPlatform)
-        if isa(platform, AnyPlatform)
-            return Dict{String,Any}()
-        end
-        return Dict{String,Any}(string(k) => string(v) for (k, v) in tags(platform))
-    end
-
-    for build in info.builds
-        selectors = platform_selectors(build.platform)
-        for p in build.products
-            if isa(p, JLLLibraryProduct)
-                table = product_table(p.varname, p.dlid, build.name)
-                dynamic = merge(copy(selectors), Dict{String,Any}(
-                    "dlname" => basename(p.soname),
-                    "path" => p.path,
-                    "deps" => generate_toml_dict.(p.deps),
-                ))
-                push!(get!(Vector{Any}, table, "dynamic"), dynamic)
-
-                if p.static_path !== nothing
-                    static = merge(copy(selectors), Dict{String,Any}(
-                        "path" => p.static_path,
-                        "deps" => generate_toml_dict.(p.static_deps),
-                        "system_deps" => p.static_system_deps,
-                        "roots" => p.static_roots,
-                    ))
-                    push!(get!(Vector{Any}, table, "static"), static)
-                end
-            elseif isa(p, JLLStaticLibraryProduct)
-                table = product_table(p.varname, p.dlid, build.name)
-                static = merge(copy(selectors), Dict{String,Any}(
-                    "path" => p.path,
-                    "deps" => generate_toml_dict.(p.deps),
-                    "system_deps" => p.system_deps,
-                    "roots" => p.roots,
-                ))
-                push!(get!(Vector{Any}, table, "static"), static)
-            end
-        end
-    end
-
-    return Dict{String,Any}(
-        # A string version, following the `manifest_format = "2.0"` convention that
-        # `Manifest.toml` established; consumers parse it as a `VersionNumber`.
-        "library_format" => "1.0",
-        "package" => Dict{String,Any}(
-            "name" => string(info.name, "_jll"),
-            "uuid" => string(UUID(info)),
-        ),
-        "products" => products,
-    )
-end
-
 function generate_jll(out_dir::String, info::JLLInfo; clear::Bool = true, build_metadata::Dict{String,String} = Dict{String,String}())
     if clear && isdir(out_dir)
         for child in readdir(out_dir)
@@ -964,20 +943,16 @@ function generate_jll(out_dir::String, info::JLLInfo; clear::Bool = true, build_
         TOML.print(io, toml_dict)
     end
 
-    # Generate `JuliaLibrary.toml`, the consumer-facing description of the libraries
-    # this package provides.  Packages that provide no libraries do not get one.
-    julia_library_dict = generate_julia_library_toml(info)
-    if !isempty(julia_library_dict["products"])
-        open(joinpath(out_dir, "JuliaLibrary.toml"); write=true) do io
-            TOML.print(io, julia_library_dict)
-        end
-    end
-
     # Generate `Artifacts.toml`
     artifacts_toml_path = joinpath(out_dir, "Artifacts.toml")
 
     # Sort builds to make this more deterministic
     for build in sort(info.builds; by=b->triplet(b.platform))
+        # We only ever generate artifact-backed builds; a bundled one has nothing to bind.
+        # The constructor already guarantees the location and the binding agree.
+        if build.location != "artifact"
+            throw(ArgumentError("Cannot generate a JLL for build '$(build.name)' with `location = \"$(build.location)\"`"))
+        end
         # Bind the main artifact
         bind_jll_artifact!(artifacts_toml_path, build.name, build.platform, build.artifact; lazy=build.lazy)
 
@@ -1098,10 +1073,8 @@ function generate_jll(out_dir::String, info::JLLInfo; clear::Bool = true, build_
             ),
 
             "compat" => Dict{String,Any}(
-                # Archive-only products are only understood by LazyJLLWrappers v1.2+;
-                # JLLs without one keep the historical floor so that they remain
-                # installable against every released wrapper.
-                "LazyJLLWrappers" => lazy_jll_wrappers_compat(info),
+                # The v2 `JLL.toml` format is only understood by LazyJLLWrappers v2+
+                "LazyJLLWrappers" => "2.0.0",
                 "julia" => info.julia_compat,
             )
         )

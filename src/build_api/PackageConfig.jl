@@ -225,12 +225,9 @@ function JLLProducts(result::ExtractResult)
         )
     end
 
-    # Copy over the LibraryProducts that were translated by the auditor
+    # Copy over the library products that were translated by the auditor; archive-only
+    # products are among them, since a library is a library however it is realized.
     append!(products, result.jll_lib_products)
-    # ... and the archive-only products, which the auditor also learned about
-    if result.audit_result !== nothing
-        append!(products, result.audit_result.static_only_products)
-    end
     return products
 end
 

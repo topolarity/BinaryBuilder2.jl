@@ -24,9 +24,8 @@ end
 Fill in the static realization of every audited library product, and audit any
 archive-only products.
 
-Returns `(jll_lib_products, static_only_products)`, where the returned library
-products carry their static metadata and `static_only_products` is a vector of
-`JLLStaticLibraryProduct` describing the archives that have no dynamic sibling.
+Returns the library products with their static realizations attached, together with
+new products for the archives that have no dynamic sibling.
 """
 function resolve_static_libraries!(scan::ScanResult,
                                    pass_results::Dict{String,Vector{PassResult}},
@@ -34,7 +33,7 @@ function resolve_static_libraries!(scan::ScanResult,
                                    dep_libs::Dict{Symbol,Vector{JLLLibraryProduct}};
                                    dep_artifact_dirs::Dict{Symbol,String} = Dict{Symbol,String}())
     if isempty(scan.static_library_products)
-        return (jll_lib_products, JLLStaticLibraryProduct[])
+        return jll_lib_products
     end
 
     # Cache the parsed contents of every archive we touch, since a single archive is
@@ -54,7 +53,8 @@ function resolve_static_libraries!(scan::ScanResult,
 
     # `resolve_dynamic_links!` already told us the SONAME of each of our own library
     # products, which is how we recognize a `DT_NEEDED` entry as one of our own.
-    own_soname_map = Dict{String,Symbol}(basename(p.soname) => p.varname for p in jll_lib_products)
+    own_soname_map = Dict{String,Symbol}(
+        basename(p.dynamic.soname) => p.varname for p in jll_lib_products if p.dynamic !== nothing)
 
     # Every varname this JLL provides, including archive-only products
     own_varnames = Set{Symbol}(p.varname for p in jll_lib_products)
@@ -80,7 +80,7 @@ function resolve_static_libraries!(scan::ScanResult,
         # sibling's DT_NEEDED entries produced, plus the edges onto our own libraries
         # that `resolve_dynamic_links!` dropped as "system" libraries.
         own_dropped, system_dropped = sibling_dropped_edges(scan, product, own_soname_map)
-        inherited_deps = unique(vcat(String[generate_toml_dict(d) for d in product.deps],
+        inherited_deps = unique(vcat(String[generate_toml_dict(d) for d in product.dynamic.deps],
                                      String[string(v) for v in own_dropped]))
 
         deps, omitted_deps = resolve_deps(slp.deps, inherited_deps)
@@ -99,21 +99,16 @@ function resolve_static_libraries!(scan::ScanResult,
 
         push!(updated_products, JLLLibraryProduct(
             product.varname,
-            product.path,
-            product.deps;
-            flags = product.flags,
-            soname = product.soname,
-            on_load_callback = product.on_load_callback,
-            dlid = product.dlid,
-            static_path = static_rel_path,
-            static_deps = jll_deps,
-            static_system_deps = system_deps,
-            static_roots = roots,
+            product.dynamic,
+            JLLStaticRealization(static_rel_path;
+                                 deps = jll_deps,
+                                 system_deps = system_deps,
+                                 roots = roots),
         ))
     end
 
     # Now audit the archive-only products, which have no sibling to learn from.
-    static_only_products = JLLStaticLibraryProduct[]
+    static_only_products = JLLLibraryProduct[]
     for (rel_path, slp) in scan.static_library_products
         if slp.varname === nothing
             # Subordinate archives were handled above
@@ -129,18 +124,14 @@ function resolve_static_libraries!(scan::ScanResult,
         if contents !== nothing
             verify_static_closure!(ctx, rel_path, contents, resolutions, nothing)
         end
-        push!(static_only_products, JLLStaticLibraryProduct(
-            slp.varname,
-            rel_path;
-            deps = jll_deps,
-            system_deps,
-            roots,
+        push!(static_only_products, JLLLibraryProduct(
+            slp.varname;
+            static = JLLStaticRealization(rel_path; deps = jll_deps, system_deps, roots),
         ))
     end
-    sort!(static_only_products; by = p -> p.varname)
-
+    append!(updated_products, static_only_products)
     sort!(updated_products; by = p -> p.varname)
-    return (updated_products, static_only_products)
+    return updated_products
 end
 
 function warn_omissions(pass_results, rel_path::String, what::String, omitted::Vector{String})
@@ -165,7 +156,7 @@ as system libraries, translated from SONAME into the bare name a linker expects.
 """
 function sibling_dropped_edges(scan::ScanResult, product::JLLLibraryProduct,
                                own_soname_map::Dict{String,Symbol})
-    rel_path = relpath(scan, product.path)
+    rel_path = relpath(scan, product.dynamic.path)
     oh = get(scan.binary_objects, rel_path, nothing)
     if oh === nothing
         return (Symbol[], String[])
@@ -294,7 +285,7 @@ function resolve_foreign_dep(ctx, rel_path::String, dep::JLLLibraryDep)
         return nothing
     end
     dep_lib = libs[idx]
-    has_static = dep_lib.static_path !== nothing
+    has_static = dep_lib.static !== nothing
 
     # If the dependency's artifact was unpacked for this build, we can read it and
     # verify against the real thing; otherwise we can only take the edge on trust.
@@ -305,7 +296,7 @@ function resolve_foreign_dep(ctx, rel_path::String, dep::JLLLibraryDep)
 
     symbols = Set{String}()
     if has_static
-        archive_path = joinpath(artifact_dir, dep_lib.static_path)
+        archive_path = joinpath(artifact_dir, dep_lib.static.path)
         if isfile(archive_path)
             contents = ctx.archive_contents(archive_path, rel_path)
             if contents !== nothing
@@ -313,8 +304,8 @@ function resolve_foreign_dep(ctx, rel_path::String, dep::JLLLibraryDep)
             end
         end
     end
-    lib_path = joinpath(artifact_dir, dep_lib.path)
-    if isfile(lib_path)
+    lib_path = dep_lib.dynamic === nothing ? nothing : joinpath(artifact_dir, dep_lib.dynamic.path)
+    if lib_path !== nothing && isfile(lib_path)
         oh = get_object_handle(lib_path, ctx.scan.platform)
         if oh !== nothing
             defined, _, _ = object_symbols(oh)
@@ -355,7 +346,7 @@ function verify_static_closure!(ctx, rel_path::String, contents::ArchiveContents
     # The dynamic sibling is our oracle for everything resolved at link time: it was
     # linked successfully against precisely the libraries we are declaring here.
     if sibling !== nothing
-        sibling_oh = get(ctx.scan.binary_objects, relpath(ctx.scan, sibling.path), nothing)
+        sibling_oh = get(ctx.scan.binary_objects, relpath(ctx.scan, sibling.dynamic.path), nothing)
         if sibling_oh !== nothing
             defined, undefined, _ = object_symbols(sibling_oh; only_external=false)
             union!(provided, defined, undefined)

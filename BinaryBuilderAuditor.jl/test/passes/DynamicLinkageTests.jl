@@ -70,14 +70,14 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
 
             @test length(jll_lib_products) == 2
             @test jll_lib_products[2].varname == :libplus
-            @test jll_lib_products[2].path == joinpath("lib", libplus_soname)
-            @test isempty(jll_lib_products[2].deps)
+            @test jll_lib_products[2].dynamic.path == joinpath("lib", libplus_soname)
+            @test isempty(jll_lib_products[2].dynamic.deps)
 
             @test jll_lib_products[1].varname == :libmult
-            @test jll_lib_products[1].path == joinpath("lib", libmult_soname)
-            @test length(jll_lib_products[1].deps) == 1
-            @test jll_lib_products[1].deps[1].mod === nothing
-            @test jll_lib_products[1].deps[1].varname == :libplus
+            @test jll_lib_products[1].dynamic.path == joinpath("lib", libmult_soname)
+            @test length(jll_lib_products[1].dynamic.deps) == 1
+            @test jll_lib_products[1].dynamic.deps[1].mod === nothing
+            @test jll_lib_products[1].dynamic.deps[1].varname == :libplus
 
 
             # Next, do a build where we pretend to be from two different JLLs:
@@ -112,10 +112,10 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
             @test success(pass_results)
             @test length(jll_lib_products) == 1
             @test jll_lib_products[1].varname == :libmult
-            @test jll_lib_products[1].path == joinpath("lib", libmult_soname)
-            @test length(jll_lib_products[1].deps) == 1
-            @test jll_lib_products[1].deps[1].mod == :LibPlus_jll
-            @test jll_lib_products[1].deps[1].varname == :libplus
+            @test jll_lib_products[1].dynamic.path == joinpath("lib", libmult_soname)
+            @test length(jll_lib_products[1].dynamic.deps) == 1
+            @test jll_lib_products[1].dynamic.deps[1].mod == :LibPlus_jll
+            @test jll_lib_products[1].dynamic.deps[1].varname == :libplus
         end
     end
 
