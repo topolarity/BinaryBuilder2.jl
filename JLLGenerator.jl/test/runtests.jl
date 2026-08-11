@@ -570,6 +570,172 @@ end
     @test libgfortran.dlid == JLLGenerator.uuid5(Base.UUID(new_jll), "libgfortran")
 end
 
+@testset "Archive-only library products" begin
+    # An archive-only product roundtrips, and declares its own identity
+    sp = JLLStaticLibraryProduct(:libfoo_a, "lib/libfoo.a";
+                                 deps = [JLLLibraryDep(nothing, :libbar)],
+                                 system_deps = ["m"],
+                                 roots = ["ctor"])
+    d = generate_toml_dict(sp)
+    @test d["type"] == "static_library"
+    @test d["path"] == "lib/libfoo.a"
+    @test d["deps"] == ["libbar"]
+    @test d["system_deps"] == ["m"]
+    @test d["roots"] == ["ctor"]
+    @test !haskey(d, "dlid")
+    @test parse_toml_dict(JLLStaticLibraryProduct, d) == sp
+    @test parse_toml_dict(AbstractJLLProduct, d) == sp
+
+    function make_jll(products)
+        return JLLInfo(; name = "Demo", version = v"1.0.0", builds = [
+            JLLBuildInfo(;
+                src_version = v"1.0.0",
+                platform = Platform("x86_64", "linux"),
+                name = "Demo",
+                artifact = JLLArtifactBinding(
+                    treehash = "0c6c284985577758b3a339c6215c9d4e3d71420e",
+                    download_sources = [],
+                ),
+                products,
+                licenses = [mit_license],
+            ),
+        ])
+    end
+
+    # Its dependency edges are held to the same coherence standard
+    @test_throws ArgumentError make_jll([
+        JLLStaticLibraryProduct(:libfoo_a, "lib/libfoo.a"; deps = [JLLLibraryDep(nothing, :nope)]),
+    ])
+    @test_throws ArgumentError make_jll([
+        JLLStaticLibraryProduct(:libfoo_a, "lib/libfoo.a"; deps = [JLLLibraryDep(:Zlib_jll, :libz)]),
+    ])
+
+    # It is assigned a stable identity just like a library product, and roundtrips
+    jll = make_jll([
+        JLLLibraryProduct(:libbar, "lib/libbar.so.1", []),
+        JLLStaticLibraryProduct(:libfoo_a, "lib/libfoo.a"; deps = [JLLLibraryDep(nothing, :libbar)]),
+    ])
+    libfoo_a = only([p for p in only(jll.builds).products if p.varname == :libfoo_a])
+    @test libfoo_a.dlid == JLLGenerator.uuid5(Base.UUID(jll), "libfoo_a")
+    _, new_jll = roundtrip_jll_through_toml(jll)
+    @test new_jll == jll
+
+    # Only a JLL that actually contains one needs the newer wrapper
+    @test JLLGenerator.lazy_jll_wrappers_compat(jll) == "1.2.0"
+    @test JLLGenerator.lazy_jll_wrappers_compat(make_jll([
+        JLLLibraryProduct(:libbar, "lib/libbar.so.1", []),
+    ])) == "1.0.0"
+end
+
+@testset "JuliaLibrary.toml projection" begin
+    lib = JLLLibraryProduct(:libgfortran, "lib/libgfortran.so.5.0.0",
+                            [JLLLibraryDep(nothing, :libquadmath)];
+                            soname = "libgfortran.so.5",
+                            static_path = "lib/gcc/libgfortran.a",
+                            static_deps = [JLLLibraryDep(nothing, :libquadmath)],
+                            static_system_deps = ["c", "m"],
+                            static_roots = ["_gfortran_set_args"])
+    jll = JLLInfo(; name = "CSL", version = v"1.0.0", builds = [
+        JLLBuildInfo(;
+            src_version = v"1.0.0",
+            platform = Platform("x86_64", "linux"),
+            name = "CSL",
+            artifact = JLLArtifactBinding(
+                treehash = "0c6c284985577758b3a339c6215c9d4e3d71420e",
+                download_sources = [],
+            ),
+            products = [
+                JLLLibraryProduct(:libquadmath, "lib/libquadmath.so.0", []),
+                lib,
+                JLLStaticLibraryProduct(:libonly, "lib/libonly.a"; system_deps = ["c"]),
+                # Non-library products have no place in a library description
+                JLLExecutableProduct(:gfortran, "bin/gfortran"),
+            ],
+            licenses = [mit_license],
+        ),
+    ])
+
+    d = generate_julia_library_toml(jll)
+    @test d["library_format"] == 1.0
+    @test d["package"]["name"] == "CSL_jll"
+    @test d["package"]["uuid"] == string(Base.UUID(jll))
+
+    products = d["products"]
+    # Executables are not libraries, so they do not appear
+    @test sort(collect(keys(products))) == ["libgfortran", "libonly", "libquadmath"]
+
+    gf = products["libgfortran"]
+    @test gf["artifact"] == "CSL"
+    @test gf["dlid"] == string(JLLGenerator.uuid5(Base.UUID(jll), "libgfortran"))
+
+    # Both realizations are present, and carry Artifacts.toml-style platform selectors
+    dyn = only(gf["dynamic"])
+    @test dyn["dlname"] == "libgfortran.so.5"
+    @test dyn["path"] == "lib/libgfortran.so.5.0.0"
+    @test dyn["deps"] == ["libquadmath"]
+    @test dyn["arch"] == "x86_64" && dyn["os"] == "linux" && dyn["libc"] == "glibc"
+
+    stat = only(gf["static"])
+    @test stat["path"] == "lib/gcc/libgfortran.a"
+    @test stat["deps"] == ["libquadmath"]
+    @test stat["system_deps"] == ["c", "m"]
+    @test stat["roots"] == ["_gfortran_set_args"]
+    @test stat["arch"] == "x86_64"
+
+    # A library with no archive has no `static` group at all...
+    @test !haskey(products["libquadmath"], "static")
+    @test length(products["libquadmath"]["dynamic"]) == 1
+
+    # ... and an archive-only library has no `dynamic` group, which is how a consumer
+    # knows that asking to `dlopen` it is an error rather than an oversight.
+    @test !haskey(products["libonly"], "dynamic")
+    @test only(products["libonly"]["static"])["path"] == "lib/libonly.a"
+    @test products["libonly"]["dlid"] == string(JLLGenerator.uuid5(Base.UUID(jll), "libonly"))
+
+    # Every product declares at least one realization
+    @test all(haskey(p, "dynamic") || haskey(p, "static") for p in values(products))
+
+    # A build for several platforms accumulates one entry per platform in each group
+    multi = JLLInfo(; name = "CSL", version = v"1.0.0", builds = [
+        JLLBuildInfo(; src_version = v"1.0.0", platform = p, name = "CSL",
+                     artifact = JLLArtifactBinding(
+                        treehash = "0c6c284985577758b3a339c6215c9d4e3d71420e",
+                        download_sources = []),
+                     products = [JLLLibraryProduct(:libz, "lib/libz.so.1", [])],
+                     licenses = [mit_license])
+        for p in (Platform("x86_64", "linux"), Platform("aarch64", "macos"))
+    ])
+    entries = generate_julia_library_toml(multi)["products"]["libz"]["dynamic"]
+    @test length(entries) == 2
+    @test sort([e["os"] for e in entries]) == ["linux", "macos"]
+
+    # A JLL with no libraries at all gets no `JuliaLibrary.toml`
+    nolibs = JLLInfo(; name = "Tool", version = v"1.0.0", builds = [
+        JLLBuildInfo(; src_version = v"1.0.0", platform = Platform("x86_64", "linux"),
+                     name = "Tool",
+                     artifact = JLLArtifactBinding(
+                        treehash = "0c6c284985577758b3a339c6215c9d4e3d71420e",
+                        download_sources = []),
+                     products = [JLLExecutableProduct(:tool, "bin/tool")],
+                     licenses = [mit_license])])
+    @test isempty(generate_julia_library_toml(nolibs)["products"])
+    mktempdir() do dir
+        generate_jll(dir, nolibs)
+        @test !isfile(joinpath(dir, "JuliaLibrary.toml"))
+    end
+
+    # ... whereas one that does provide libraries gets a parseable one on disk
+    mktempdir() do dir
+        generate_jll(dir, jll)
+        @test isfile(joinpath(dir, "JuliaLibrary.toml"))
+        on_disk = TOML.parsefile(joinpath(dir, "JuliaLibrary.toml"))
+        @test on_disk["library_format"] == 1.0
+        @test !haskey(on_disk["products"]["libonly"], "dynamic")
+        # A JLL containing an archive-only product requires the newer wrapper
+        @test TOML.parsefile(joinpath(dir, "Project.toml"))["compat"]["LazyJLLWrappers"] == "1.2.0"
+    end
+end
+
 # Test that we can generate all of the stdlib JLLs in `contrib/`
 @testset "stdlib JLL generation" begin
     include(joinpath(dirname(@__DIR__), "contrib", "gen_julia_jlls.jl"))
