@@ -855,6 +855,25 @@ any platform.
 A library that ships only an archive simply has no `dynamic` group, which is how a
 consumer knows that asking to `dlopen` it is an error rather than an oversight.
 """
+# INVARIANT: carrying the platform selectors *inline*, on each realization entry, is a
+# stopgap.  It is only sound while nothing consumes the records of published registry
+# JLLs, and published JLLs will require the artifact-backed form instead.
+#
+# The reason is selection coherence.  A JLL whose artifacts are chosen by an augmented
+# platform -- libgfortran and cxxstring ABI expansion, say -- runs Pkg's augment hooks
+# when it picks the artifact.  A consumer that runs its own `select_platform` over the
+# inline entries here does not run those hooks, so the two selections can disagree, and
+# the realization we describe need not be the one that was actually installed.  There
+# is no way to close that gap while the two selections are independent.
+#
+# The artifact-backed form is coherent by construction, because a single selection
+# resolves the artifact and its metadata together.  Switching to it means moving the
+# per-entry platform selectors out of here and into `products` sub-tables on the
+# `Artifacts.toml` entries that `generate_jll` already writes, leaving this file with
+# only platform-invariant data.  Note when doing so that nothing of ours may appear as
+# a String key at an entry's top level: `unpack_platform` lifts those into platform
+# tags, so they would silently corrupt artifact matching.  A sub-table is invisible to
+# it, which is why the metadata has to live in one.
 function generate_julia_library_toml(info::JLLInfo)
     products = Dict{String,Any}()
 
