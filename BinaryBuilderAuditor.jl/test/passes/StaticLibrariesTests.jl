@@ -104,14 +104,17 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
     end
 
     # Run the dynamic and static passes over a prefix, returning everything of interest
-    function run_static_passes(prefix, library_products; static_library_products = StaticLibraryProduct[])
+    function run_static_passes(prefix, library_products; static_library_products = StaticLibraryProduct[],
+                               dep_libs = Dict{Symbol,Vector{JLLLibraryProduct}}(),
+                               dep_artifact_dirs = Dict{Symbol,String}())
         scan = scan_files(prefix, target_platform, library_products,
                           Dict("prefix" => prefix, "bb_full_target" => triplet(target_platform));
                           static_library_products)
         pass_results = Dict{String,Vector{PassResult}}()
         ensure_sonames!(scan, pass_results)
-        jll_lib_products = resolve_dynamic_links!(scan, pass_results, Dict{Symbol,Vector{JLLLibraryProduct}}())
-        jll_lib_products, standalone = resolve_static_libraries!(scan, pass_results, jll_lib_products)
+        jll_lib_products = resolve_dynamic_links!(scan, pass_results, dep_libs)
+        jll_lib_products, standalone = resolve_static_libraries!(scan, pass_results, jll_lib_products,
+                                                                 dep_libs; dep_artifact_dirs)
         by_varname = Dict(p.varname => p for p in jll_lib_products)
         return (; scan, pass_results, jll_lib_products, standalone, by_varname)
     end
@@ -205,15 +208,23 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
             @test contains(messages(r.pass_results, static_pass_name, libmult.static_path), "libplus")
 
             # The `:inherit` sentinel augments rather than replaces
+            zlib_dep_libs = Dict{Symbol,Vector{JLLLibraryProduct}}(
+                :Zlib => [JLLLibraryProduct(:libz, "lib/libz.so.1", [])],
+            )
             r = run_static_passes(prefix, [
                 LibraryProduct("libplus", :libplus; static=StaticLibraryProduct("libplus.a")),
                 LibraryProduct("libmult", :libmult;
                                static=StaticLibraryProduct("libmult.a"; deps=[:inherit, "Zlib_jll.libz"])),
-            ])
+            ]; dep_libs = zlib_dep_libs)
             libmult = r.by_varname[:libmult]
             @test libmult.static_deps == [JLLLibraryDep(nothing, :libplus), JLLLibraryDep(:Zlib_jll, :libz)]
-            # We could not read `Zlib_jll`, so unresolved symbols are a warning, not a failure
+            # `Zlib_jll` resolved, but its files are not reachable from here, so an
+            # unresolved symbol can only be a warning
             @test !has_status(r.pass_results, static_pass_name, libmult.static_path, :fail)
+            # ... and it has no static realization, which we surface without failing the
+            # build, since linking an archive against a dynamic-only dependency is normal
+            @test contains(messages(r.pass_results, static_pass_name, libmult.static_path),
+                           "no static realization")
 
             # `system_deps` behaves identically: replacement warns about omissions...
             r = run_static_passes(prefix, [
@@ -258,6 +269,125 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
         end
     end
 
+    @testset "own-JLL libraries are not system libraries - $(triplet(target_platform))" begin
+        # `libgcc_s` is classified as a system library, but a JLL such as
+        # CompilerSupportLibraries ships it itself.  When it is one of our own products
+        # it has to become a real dependency edge, not a system dependency.
+        if Sys.islinux(target_platform)
+            mktempdir() do prefix
+                libdir = joinpath(prefix, "lib")
+                mkpath(libdir)
+                objdir = mktempdir()
+                with_toolchains([toolchain]) do _, env
+                    plus_o = joinpath(objdir, "libplus.o")
+                    mult_o = joinpath(objdir, "libmult.o")
+                    run(setenv(`$(env["CC"]) -c -o $(plus_o) -fPIC $(libplus_c_path)`, env))
+                    run(setenv(`$(env["CC"]) -c -o $(mult_o) -fPIC $(libmult_c_path)`, env))
+                    # Ship a library that looks, by SONAME, exactly like a system library
+                    run(setenv(`$(env["CC"]) -o $(joinpath(libdir, "libgcc_s.so.1")) -shared $(plus_o) -Wl,-soname,libgcc_s.so.1`, env))
+                    run(setenv(`$(env["CC"]) -o $(joinpath(libdir, libmult_soname)) -shared $(mult_o) -L $(libdir) -l:libgcc_s.so.1 $(soname_flag(target_platform, libmult_soname))`, env))
+                    run(setenv(`$(env["AR"]) crs $(joinpath(libdir, "libmult.a")) $(mult_o)`, env))
+                end
+                mkpath(joinpath(prefix, "share", "licenses", "x"))
+                touch(joinpath(prefix, "share", "licenses", "x", "LICENSE.md"))
+
+                r = run_static_passes(prefix, [
+                    LibraryProduct("lib/libgcc_s.so.1", :libgcc_s),
+                    LibraryProduct("libmult", :libmult; static=StaticLibraryProduct("libmult.a")),
+                ])
+                libmult = r.by_varname[:libmult]
+                # The edge is recorded as a real dependency...
+                @test JLLLibraryDep(nothing, :libgcc_s) ∈ libmult.static_deps
+                # ... and is *not* reported as a system library
+                @test "gcc_s" ∉ libmult.static_system_deps
+                # The C runtime is still a system dependency
+                @test "c" ∈ libmult.static_system_deps
+            end
+        end
+    end
+
+    @testset "static dependency resolution - $(triplet(target_platform))" begin
+        mktempdir() do prefix
+            build_static_prefix(prefix)
+
+            # An edge naming a library this build does not provide is a hard failure
+            r = run_static_passes(prefix, [
+                LibraryProduct("libplus", :libplus; static=StaticLibraryProduct("libplus.a")),
+                LibraryProduct("libmult", :libmult;
+                               static=StaticLibraryProduct("libmult.a"; deps=["libnope"])),
+            ])
+            libmult = r.by_varname[:libmult]
+            @test has_status(r.pass_results, static_pass_name, libmult.static_path, :fail)
+            @test contains(messages(r.pass_results, static_pass_name, libmult.static_path),
+                           "does not name any library product")
+
+            # ... as is one naming a JLL we do not depend on
+            r = run_static_passes(prefix, [
+                LibraryProduct("libplus", :libplus; static=StaticLibraryProduct("libplus.a")),
+                LibraryProduct("libmult", :libmult;
+                               static=StaticLibraryProduct("libmult.a"; deps=["Nope_jll.libnope"])),
+            ])
+            libmult = r.by_varname[:libmult]
+            @test has_status(r.pass_results, static_pass_name, libmult.static_path, :fail)
+            @test contains(messages(r.pass_results, static_pass_name, libmult.static_path),
+                           "not a dependency of this build")
+
+            # ... as is one naming a library that dependency does not provide
+            r = run_static_passes(prefix, [
+                LibraryProduct("libplus", :libplus; static=StaticLibraryProduct("libplus.a")),
+                LibraryProduct("libmult", :libmult;
+                               static=StaticLibraryProduct("libmult.a"; deps=["Zlib_jll.libwrong"])),
+            ]; dep_libs = Dict{Symbol,Vector{JLLLibraryProduct}}(
+                :Zlib => [JLLLibraryProduct(:libz, "lib/libz.so.1", [])]))
+            libmult = r.by_varname[:libmult]
+            @test has_status(r.pass_results, static_pass_name, libmult.static_path, :fail)
+            @test contains(messages(r.pass_results, static_pass_name, libmult.static_path),
+                           "does not name a library product")
+        end
+    end
+
+    @testset "opportunistic symbol verification - $(triplet(target_platform))" begin
+        mktempdir() do prefix
+            build_static_prefix(prefix)
+
+            # Pretend `libplus` belongs to another JLL whose artifact happens to be
+            # unpacked right here, so its files can actually be read.
+            plus_libs = Dict{Symbol,Vector{JLLLibraryProduct}}(
+                :Plus => [JLLLibraryProduct(:libplus, joinpath("lib", libplus_soname), [];
+                                            static_path = joinpath("lib", "libplus.a"))],
+            )
+            reachable = Dict{Symbol,String}(:Plus => prefix)
+
+            # With the dependency readable, `libmult.a`'s reference to `plus` is verified
+            r = run_static_passes(prefix,
+                LibraryProduct[];
+                static_library_products = [
+                    StaticLibraryProduct("libmult.a"; varname=:libmult_a,
+                                         deps=["Plus_jll.libplus"], system_deps=["c"]),
+                ],
+                dep_libs = plus_libs, dep_artifact_dirs = reachable)
+            info = only(r.standalone)
+            @test has_status(r.pass_results, static_pass_name, info.path, :success)
+            # It resolved to a library that does ship an archive, and every symbol was
+            # verified against the real files, so nothing is left unproven
+            @test !has_status(r.pass_results, static_pass_name, info.path, :warn)
+            @test !has_status(r.pass_results, static_pass_name, info.path, :fail)
+
+            # With the very same declaration but the artifact out of reach, we cannot
+            # verify, and say so rather than pretending
+            r = run_static_passes(prefix,
+                LibraryProduct[];
+                static_library_products = [
+                    StaticLibraryProduct("libmult.a"; varname=:libmult_a,
+                                         deps=["Plus_jll.libplus"], system_deps=["c"]),
+                ],
+                dep_libs = plus_libs)
+            info = only(r.standalone)
+            @test has_status(r.pass_results, static_pass_name, info.path, :warn)
+            @test contains(messages(r.pass_results, static_pass_name, info.path), "could not inspect")
+        end
+    end
+
     @testset "standalone static library - $(triplet(target_platform))" begin
         mktempdir() do prefix
             build_static_prefix(prefix)
@@ -270,10 +400,12 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
                     StaticLibraryProduct("libmult.a"; varname=:libmult_a, deps=["libplus"], system_deps=["c"]),
                 ])
             info = only(r.standalone)
+            @test isa(info, JLLStaticLibraryProduct)
             @test info.varname == :libmult_a
             @test info.path == joinpath("lib", "libmult.a")
             @test info.deps == [JLLLibraryDep(nothing, :libplus)]
             @test info.system_deps == ["c"]
+            @test info.roots == String[]
             # `libplus` is in the prefix, so `mult`'s reference to `plus` resolves
             @test has_status(r.pass_results, static_pass_name, info.path, :success)
 

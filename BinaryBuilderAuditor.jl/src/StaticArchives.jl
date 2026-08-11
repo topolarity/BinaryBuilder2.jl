@@ -1,23 +1,6 @@
 using ObjectFile, JLLGenerator
 
-export ArchiveMember, ArchiveContents, StaticLibraryInfo, read_archive_members, scan_static_archive
-
-"""
-    StaticLibraryInfo
-
-The audited description of a static archive: where it lives within the artifact,
-what it must be linked against, and which of its members must be forcibly retained
-because they carry static initializers.
-"""
-struct StaticLibraryInfo
-    # `nothing` for the archive of a `LibraryProduct` (which owns the identity),
-    # otherwise the varname of the standalone `StaticLibraryProduct`.
-    varname::Union{Nothing,Symbol}
-    path::String
-    deps::Vector{JLLLibraryDep}
-    system_deps::Vector{String}
-    roots::Vector{String}
-end
+export ArchiveMember, ArchiveContents, read_archive_members, scan_static_archive
 
 """
     ArchiveMember

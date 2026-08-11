@@ -27,6 +27,7 @@ function audit!(prefix::String,
                     "bb_full_target" => triplet(platform),
                 ),
                 static_library_products::Vector{StaticLibraryProduct} = StaticLibraryProduct[],
+                dep_artifact_dirs::Dict{Symbol,String} = Dict{Symbol,String}(),
                 verbose::Bool = false,
                 readonly::Bool = false)
     # First, scan the prefix:
@@ -53,7 +54,7 @@ function audit!(prefix::String,
     jll_lib_products = resolve_dynamic_links!(scan, pass_results, dep_libs)
 
     # Attach the static realization of each library product, and audit standalone archives
-    jll_lib_products, static_only_products = resolve_static_libraries!(scan, pass_results, jll_lib_products)
+    jll_lib_products, static_only_products = resolve_static_libraries!(scan, pass_results, jll_lib_products, dep_libs; dep_artifact_dirs)
 
     # Ensure that all libraries and executables have the correct RPATH setup
     if !readonly
