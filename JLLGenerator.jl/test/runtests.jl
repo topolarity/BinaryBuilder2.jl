@@ -656,7 +656,7 @@ end
     ])
 
     d = generate_julia_library_toml(jll)
-    @test d["library_format"] == 1.0
+    @test d["library_format"] == "1.0"
     @test d["package"]["name"] == "CSL_jll"
     @test d["package"]["uuid"] == string(Base.UUID(jll))
 
@@ -666,6 +666,10 @@ end
 
     gf = products["libgfortran"]
     @test gf["artifact"] == "CSL"
+    # Every product says where its realizations live; BinaryBuilder always ships
+    # them in artifacts, and the consumer schema requires the key to be present.
+    @test gf["location"] == "artifact"
+    @test all(p["location"] == "artifact" for p in values(products))
     @test gf["dlid"] == string(JLLGenerator.uuid5(Base.UUID(jll), "libgfortran"))
 
     # Both realizations are present, and carry Artifacts.toml-style platform selectors
@@ -729,7 +733,11 @@ end
         generate_jll(dir, jll)
         @test isfile(joinpath(dir, "JuliaLibrary.toml"))
         on_disk = TOML.parsefile(joinpath(dir, "JuliaLibrary.toml"))
-        @test on_disk["library_format"] == 1.0
+        @test on_disk["library_format"] == "1.0"
+        # A string version, parsed by consumers as a `VersionNumber`
+        @test on_disk["library_format"] isa String
+        @test VersionNumber(on_disk["library_format"]).major == 1
+        @test all(p["location"] == "artifact" for p in values(on_disk["products"]))
         @test !haskey(on_disk["products"]["libonly"], "dynamic")
         # A JLL containing an archive-only product requires the newer wrapper
         @test TOML.parsefile(joinpath(dir, "Project.toml"))["compat"]["LazyJLLWrappers"] == "1.2.0"

@@ -844,7 +844,8 @@ description of the libraries a package provides and how to link against them.  W
 narrow, symmetric statement about libraries only.
 
 Each library product becomes a `[products.X]` table carrying its platform-invariant
-identity (`dlid`) and the name of the artifact its realizations live in, plus one
+identity (`dlid`), where its realizations are to be found (`location`, always
+`"artifact"` here, plus the name of the artifact carrying them), and one
 realization group per way the library can be consumed: `[[products.X.dynamic]]`
 entries for the shared library and `[[products.X.static]]` entries for the archive.
 Entries carry Artifacts.toml-style platform selectors, so a consumer resolves them
@@ -860,7 +861,9 @@ function generate_julia_library_toml(info::JLLInfo)
     function product_table(varname::Symbol, dlid, artifact_name::String)
         name = string(varname)
         if !haskey(products, name)
-            d = Dict{String,Any}("artifact" => artifact_name)
+            # Everything BinaryBuilder generates ships its libraries in artifacts,
+            # rather than bundled alongside the package itself.
+            d = Dict{String,Any}("location" => "artifact", "artifact" => artifact_name)
             if dlid !== nothing
                 d["dlid"] = string(dlid)
             end
@@ -913,8 +916,9 @@ function generate_julia_library_toml(info::JLLInfo)
     end
 
     return Dict{String,Any}(
-        # Spelled as a TOML float, matching the schema definition
-        "library_format" => 1.0,
+        # A string version, following the `manifest_format = "2.0"` convention that
+        # `Manifest.toml` established; consumers parse it as a `VersionNumber`.
+        "library_format" => "1.0",
         "package" => Dict{String,Any}(
             "name" => string(info.name, "_jll"),
             "uuid" => string(UUID(info)),
