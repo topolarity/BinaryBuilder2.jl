@@ -6,12 +6,14 @@ export audit!, AuditResult
 include("Utils.jl")
 include("SystemLibraries.jl")
 include("AuditorToolchain.jl")
+include("StaticArchives.jl")
 include("Scanning.jl")
 include("AuditResult.jl")
 include("LdScriptParser.jl")
 include("passes/RelativeSymlink.jl")
 include("passes/LibrarySONAME.jl")
 include("passes/DynamicLinkage.jl")
+include("passes/StaticLibraries.jl")
 include("passes/Licenses.jl")
 
 
@@ -24,6 +26,7 @@ function audit!(prefix::String,
                     "prefix" => prefix,
                     "bb_full_target" => triplet(platform),
                 ),
+                static_library_products::Vector{StaticLibraryProduct} = StaticLibraryProduct[],
                 verbose::Bool = false,
                 readonly::Bool = false)
     # First, scan the prefix:
@@ -31,7 +34,8 @@ function audit!(prefix::String,
         prefix,
         platform,
         library_products,
-        env,
+        env;
+        static_library_products,
     )
     pass_results = Dict{String,Vector{PassResult}}()
 
@@ -47,6 +51,9 @@ function audit!(prefix::String,
 
     # Solve dynamic linkage, obtaining the output JLLLibraryProduct objects
     jll_lib_products = resolve_dynamic_links!(scan, pass_results, dep_libs)
+
+    # Attach the static realization of each library product, and audit standalone archives
+    jll_lib_products, static_only_products = resolve_static_libraries!(scan, pass_results, jll_lib_products, dep_libs)
 
     # Ensure that all libraries and executables have the correct RPATH setup
     if !readonly
@@ -67,6 +74,7 @@ function audit!(prefix::String,
         scan,
         pass_results,
         jll_lib_products,
+        static_only_products,
     )
 end
 

@@ -20,6 +20,13 @@ struct AuditResult
 
     # These contain the learned interdependency structure of the libraries
     jll_lib_products::Vector{JLLLibraryProduct}
+
+    # Static archives that have no dynamic sibling, and so are not described by any
+    # of the `jll_lib_products` above.
+    static_only_products::Vector{StaticLibraryInfo}
+end
+function AuditResult(scan, pass_results, jll_lib_products)
+    return AuditResult(scan, pass_results, jll_lib_products, StaticLibraryInfo[])
 end
 
 Base.success(ar::AuditResult) = success(ar.pass_results)

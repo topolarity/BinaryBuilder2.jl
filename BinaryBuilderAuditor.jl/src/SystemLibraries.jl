@@ -1,5 +1,52 @@
 using Base.BinaryPlatforms
 
+"""
+    system_library_linker_name(soname::AbstractString, platform::AbstractPlatform)
+
+Translate the SONAME of a system library into the bare name a linker would be given
+for it, e.g. `libm.so.6` -> `"m"` and `libpthread.so.0` -> `"pthread"` (note there is
+no `-l` prefix; that is the caller's business).
+
+Returns `nothing` for entries that are not linkable libraries at all, such as the
+dynamic loader itself.
+"""
+function system_library_linker_name(soname::AbstractString, platform::AbstractPlatform)
+    name = basename(String(soname))
+
+    # The dynamic loader is not something one links against
+    if startswith(name, "ld-") || startswith(name, "ld64.") || startswith(name, "ld.")
+        return nothing
+    end
+
+    # musl spells its C library `libc.musl-x86_64.so.1`, which no amount of generic
+    # version-suffix stripping will turn back into `c`.
+    if startswith(name, "libc.musl-")
+        return "c"
+    end
+
+    # Strip the platform's versioned extension (`libfoo.so.1.2`, `libfoo.1.dylib`,
+    # `libfoo-1.dll`), falling back to a plain extension strip for names that don't
+    # follow the convention (e.g. `kernel32.dll`).
+    name = try
+        first(parse_dl_name_version(name, os(platform)))
+    catch
+        replace(name, r"\.(so|dylib|dll|a)(\.[\d.]*)?$"i => "")
+    end
+
+    # Apple also spells compatibility versions with a letter (`libSystem.B.dylib`),
+    # which `parse_dl_name_version()` does not recognize as a version at all, but
+    # which is nonetheless linked as `-lSystem`.
+    if Sys.isapple(platform)
+        name = replace(name, r"\.[A-Z]$" => "")
+    end
+
+    # Linkers take `-lm`, not `-llibm`
+    if startswith(name, "lib") && length(name) > 3
+        name = name[4:end]
+    end
+    return isempty(name) ? nothing : name
+end
+
 function is_system_library(soname::AbstractString, platform::AbstractPlatform)
     soname = basename(soname)
     if os(platform) == "linux"
