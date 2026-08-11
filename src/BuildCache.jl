@@ -192,6 +192,20 @@ function export_archive(bc::BuildCache, build_hash::SHA1Hash, extract_hash::SHA1
     end
 end
 
+"""
+    import_jll_lib_products(d)
+
+Read back the library products of a cached extraction.  They are keyed by name, as in
+`JLL.toml`; an entry written before that format is simply not usable, so we return
+`nothing` and let the caller drop it rather than guessing at its shape.
+"""
+function import_jll_lib_products(d)
+    if !isa(d, AbstractDict)
+        return nothing
+    end
+    return JLLLibraryProduct[parse_toml_dict(JLLLibraryProduct, name, p) for (name, p) in d]
+end
+
 function import_archives(bc::BuildCache, dir::String)
     # Use `.jlp` files in the `dir` to find all (build_hash, extract_hash) pairings
     jlp_files = filter(endswith(".jlp"), readdir(dir))
@@ -227,10 +241,15 @@ function import_archives(bc::BuildCache, dir::String)
             extract_artifact = import_artifact("$(bh)-$(eh)-artifact.tar.zst")
             extract_log_artifact = import_artifact("$(bh)-$(eh)-log_artifact.tar.zst")
             jll_lib_products = TOML.parsefile(joinpath(dir, "$(bh)-$(eh).jlp"))["jll_lib_products"]
+            products = import_jll_lib_products(jll_lib_products)
+            if products === nothing
+                @debug("Skipping cache entry whose library products predate the v2 format", build_hash=bh, extract_hash=eh)
+                continue
+            end
             extract_entry = BuildCacheExtractEntry(
                 extract_artifact,
                 extract_log_artifact,
-                parse_toml_dict.(JLLLibraryProduct, jll_lib_products),
+                products,
             )
         catch ex
             @debug("Unable to import BuildCacheExtractEntry", exception=ex, build_hash=bh, extract_hash=eh)
@@ -364,10 +383,15 @@ function load_cache(cache_dir::String = default_buildcache_dir())
                 continue
             end
 
+            products = import_jll_lib_products(jll_lib_products)
+            if products === nothing
+                @debug("skip: library products predate the v2 format", extract_hash)
+                continue
+            end
             extract_entries[extract_hash] = BuildCacheExtractEntry(
                 artifact_hash,
                 log_artifact_hash,
-                parse_toml_dict.(JLLLibraryProduct, jll_lib_products),
+                products,
             )
         end
     end

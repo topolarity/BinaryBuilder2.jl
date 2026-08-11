@@ -130,7 +130,9 @@ end
 
 function export_jll_lib_products(products::Vector{JLLLibraryProduct}, jlp_path::String)
     toml_io = IOBuffer()
-    TOML.print(toml_io, Dict("jll_lib_products" => generate_toml_dict.(products)))
+    # Keyed by name, mirroring how `JLL.toml` records a build's products
+    TOML.print(toml_io, Dict("jll_lib_products" =>
+        Dict(string(p.varname) => generate_toml_dict(p) for p in products)))
     jll_lib_product_str = String(take!(toml_io))
     if filesize(jlp_path) != length(jll_lib_product_str)
         open(jlp_path; write=true) do jlp_io
