@@ -278,7 +278,7 @@ $WORKSPACE/srcdir/gcc-*/configure \
     --disable-bootstrap \
     --disable-werror \
     --enable-threads=posix \
-    --enable-languages=c,c++ \
+    --enable-languages=c,c++,fortran \
     --with-build-sysroot="${target_prefix}/${target}" \
     --with-sysroot="${host_prefix}/${target}" \
     --program-prefix="${target}-" \
@@ -297,6 +297,51 @@ rm -rf ${prefix}/share/man
 # Install licenses
 install_license ${WORKSPACE}/srcdir/gcc-*/COPYING*
 """
+
+# Static archives are deliberately kept off the default library search path, so that
+# a `-L${libdir}` does not silently turn a dynamic link into a static one.  We park
+# them in GCC's own private directory, which is where `libgcc.a` already lives and
+# matches the convention `CompilerSupportLibraries` adopted in JuliaLang/julia#48081.
+const gcc_static_lib_dir = raw"lib/gcc/${target}/${gcc_version}"
+
+"""
+    gcc_support_library_products(platform)
+
+The compiler support libraries that GCC installs alongside the target sysroot.
+`libgfortran` (and `libquadmath`, where it exists) also ship as static archives,
+declared as the subordinate static realization of the corresponding dynamic
+library so that consumers can link either one.
+
+Note that the archives do not sit next to the shared libraries; see
+`gcc_static_lib_dir` for why.
+"""
+function gcc_support_library_products(platform::AbstractPlatform)
+    products = [
+        LibraryProduct([
+                raw"${target}/${lib64}/libgcc_s",
+                # Special windows naming of libgcc_s
+                raw"${target}/${lib64}/libgcc_s_seh",
+                raw"${target}/${lib64}/libgcc_s_sjlj",
+            ],
+            :libgcc_s
+        ),
+        LibraryProduct(
+            [raw"${target}/${lib64}/libgfortran"],
+            :libgfortran;
+            static = StaticLibraryProduct([string(gcc_static_lib_dir, "/libgfortran.a")]),
+        ),
+    ]
+
+    # `libquadmath` provides `real(16)` support, and only exists on x86
+    if arch(platform.target) ∈ ("x86_64", "i686")
+        push!(products, LibraryProduct(
+            [raw"${target}/${lib64}/libquadmath"],
+            :libquadmath;
+            static = StaticLibraryProduct([string(gcc_static_lib_dir, "/libquadmath.a")]),
+        ))
+    end
+    return products
+end
 
 function gcc_extract_spec_generator(build::BuildConfig, platform::AbstractPlatform)
     gcc_crt_object_names = ["libgcc.a"]
@@ -325,20 +370,20 @@ function gcc_extract_spec_generator(build::BuildConfig, platform::AbstractPlatfo
         ),
         "GCC_support_libraries" => ExtractSpec(
             raw"""
+            shopt -s nullglob
             extract ${prefix}/${target}/${lib64}
             # Remove `libstdc++`, as that was extracted in `libstdcxx`
             rm -f ${extract_dir}/${target}/${lib64}/libstdc++*
+
+            # Move the static archives off the default library search path and into
+            # GCC's private directory, alongside where `libgcc.a` lives.
+            static_dir="${extract_dir}/""" * gcc_static_lib_dir * raw""""
+            mkdir -p "${static_dir}"
+            for archive in ${extract_dir}/${target}/${lib64}/*.a; do
+                mv -v "${archive}" "${static_dir}/"
+            done
             """,
-            [
-                LibraryProduct([
-                        raw"${target}/${lib64}/libgcc_s",
-                        # Special windows naming of libgcc_s
-                        raw"${target}/${lib64}/libgcc_s_seh",
-                        raw"${target}/${lib64}/libgcc_s_sjlj",
-                    ],
-                    :libgcc_s
-                ),
-            ],
+            gcc_support_library_products(platform),
             get_target_spec_by_name(build, "host");
             platform = platform.target,
         ),
