@@ -184,16 +184,32 @@ function object_symbols(oh::ObjectHandle; only_external::Bool = true)
         if isempty(name)
             continue
         end
+        # Symbols in a linked ELF object carry their version (`malloc@GLIBC_2.2.5`),
+        # while the relocatable objects inside an archive reference the bare name,
+        # so record both spellings and let the caller match on either.
+        names = unique([name, symbol_base_name(name)])
         if isundef(sym)
-            push!(undefined, name)
+            union!(undefined, names)
             if isweak(sym)
-                push!(weak_undefined, name)
+                union!(weak_undefined, names)
             end
         elseif !only_external || isglobal(sym) || isweak(sym)
-            push!(defined, name)
+            union!(defined, names)
         end
     end
     return (defined, undefined, weak_undefined)
+end
+
+"""
+    symbol_base_name(name::AbstractString)
+
+Strip the ELF symbol version from a symbol name, turning both `malloc@GLIBC_2.2.5`
+(a reference to a specific version) and `malloc@@GLIBC_2.2.5` (the definition of the
+default version) into `malloc`.
+"""
+function symbol_base_name(name::AbstractString)
+    at = findfirst('@', name)
+    return at === nothing ? String(name) : String(name[1:prevind(name, at)])
 end
 
 """

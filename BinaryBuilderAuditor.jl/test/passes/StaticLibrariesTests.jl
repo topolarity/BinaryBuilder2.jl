@@ -2,7 +2,8 @@ using Test, BinaryBuilderAuditor, Base.BinaryPlatforms, ObjectFile, BinaryBuilde
       BinaryBuilderProducts, JLLGenerator
 using BinaryBuilderAuditor: resolve_dynamic_links!, resolve_static_libraries!, ensure_sonames!,
                             scan_static_archive, read_archive_members, is_static_archive,
-                            system_library_linker_name, static_pass_name
+                            system_library_linker_name, static_pass_name, object_symbols,
+                            symbol_base_name
 
 # Find the results of a single audit pass, for the given file
 function pass_results_for(pass_results, pass_name, rel_path)
@@ -13,6 +14,15 @@ function has_status(pass_results, pass_name, rel_path, status)
 end
 function messages(pass_results, pass_name, rel_path)
     return join([something(r.message, "") for r in pass_results_for(pass_results, pass_name, rel_path)], "\n")
+end
+
+@testset "symbol_base_name" begin
+    # A reference to a specific version, and the definition of the default version
+    @test symbol_base_name("malloc@GLIBC_2.2.5") == "malloc"
+    @test symbol_base_name("malloc@@GLIBC_2.2.5") == "malloc"
+    # Unversioned names pass through untouched
+    @test symbol_base_name("malloc") == "malloc"
+    @test symbol_base_name("_Z3foov") == "_Z3foov"
 end
 
 @testset "system_library_linker_name" begin
@@ -43,6 +53,7 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
     libmult_c_path = joinpath(source_dir, "libmult.c")
     libctor_c_path = joinpath(source_dir, "libctor.c")
     libextra_c_path = joinpath(source_dir, "libextra.c")
+    liballoc_c_path = joinpath(source_dir, "liballoc.c")
 
     libplus_soname = versioned_shlib("libplus", 1, target_platform)
     libmult_soname = versioned_shlib("libmult", 2, target_platform)
@@ -55,8 +66,10 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
 
     Build a prefix containing `libplus` and `libmult` in both their dynamic and static
     realizations.  `libplus`'s archive additionally contains an object with a static
-    constructor, so that it has a `root`; if `with_extra` is set, `libmult`'s archive
-    also contains an object referencing a symbol nothing provides.
+    constructor, so that it has a `root`, and one calling into libc, so that its
+    closure must be verified against symbols the shared library records with a
+    version suffix; if `with_extra` is set, `libmult`'s archive also contains an
+    object referencing a symbol nothing provides.
     """
     function build_static_prefix(prefix; with_extra::Bool = false)
         libdir = joinpath(prefix, "lib")
@@ -72,14 +85,15 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
             mult_o = compile(libmult_c_path)
             ctor_o = compile(libctor_c_path)
             extra_o = compile(libextra_c_path)
+            alloc_o = compile(liballoc_c_path)
 
             # Dynamic realizations; `libmult` links against `libplus`
-            run(setenv(`$(env["CC"]) -o $(joinpath(libdir, libplus_soname)) -shared $(plus_o) $(ctor_o) $(soname_flag(target_platform, libplus_soname))`, env))
+            run(setenv(`$(env["CC"]) -o $(joinpath(libdir, libplus_soname)) -shared $(plus_o) $(ctor_o) $(alloc_o) $(soname_flag(target_platform, libplus_soname))`, env))
             symlink(libplus_soname, joinpath(libdir, "libplus$(dlext(platform))"))
             run(setenv(`$(env["CC"]) -o $(joinpath(libdir, libmult_soname)) -shared $(mult_o) -L $(libdir) -lplus $(soname_flag(target_platform, libmult_soname))`, env))
 
             # Static realizations
-            run(setenv(`$(env["AR"]) crs $(joinpath(libdir, "libplus.a")) $(plus_o) $(ctor_o)`, env))
+            run(setenv(`$(env["AR"]) crs $(joinpath(libdir, "libplus.a")) $(plus_o) $(ctor_o) $(alloc_o)`, env))
             mult_members = with_extra ? [mult_o, extra_o] : [mult_o]
             run(setenv(`$(env["AR"]) crs $(joinpath(libdir, "libmult.a")) $(mult_members)`, env))
         end
@@ -113,11 +127,11 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
             @test scan_static_archive(joinpath(libdir, libplus_soname)) === nothing
 
             members = read_archive_members(joinpath(libdir, "libplus.a"))
-            @test length(members) == 2
-            @test Set(basename.([m.name for m in members])) == Set(["libplus.o", "libctor.o"])
+            @test length(members) == 3
+            @test Set(basename.([m.name for m in members])) == Set(["libplus.o", "libctor.o", "liballoc.o"])
 
             contents = scan_static_archive(joinpath(libdir, "libplus.a"))
-            @test contents.num_objects == 2
+            @test contents.num_objects == 3
             @test mangle("plus") ∈ contents.defined
             @test mangle("ctor_status") ∈ contents.defined
             # `set_ctor_ran` is file-local, so it cannot satisfy anyone else's reference
