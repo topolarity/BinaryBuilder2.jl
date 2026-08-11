@@ -476,6 +476,100 @@ end
     @test only(only(jll.builds).products).dlid == dlid
 end
 
+@testset "Static library realization" begin
+    # A library without a static realization declares no static metadata at all,
+    # so that existing JLLs are byte-for-byte unchanged
+    lp = JLLLibraryProduct(:libgfortran, "lib/libgfortran.so.5", [])
+    @test !has_static_realization(lp)
+    @test lp.static_path === nothing
+    d = generate_toml_dict(lp)
+    @test !any(haskey(d, k) for k in ("static_path", "static_deps", "static_system_deps", "static_roots"))
+    @test parse_toml_dict(JLLLibraryProduct, d) == lp
+
+    # Static metadata is meaningless without an archive to attach it to
+    @test_throws ArgumentError JLLLibraryProduct(:libgfortran, "lib/libgfortran.so.5", [];
+                                                 static_system_deps = ["m"])
+
+    # ... and roundtrips faithfully when present
+    static_deps = [JLLLibraryDep(nothing, :libgcc_s), JLLLibraryDep(:CSL_jll, :libquadmath)]
+    lp = JLLLibraryProduct(
+        :libgfortran,
+        "lib/libgfortran.so.5",
+        [JLLLibraryDep(nothing, :libgcc_s)];
+        static_path = "lib/libgfortran.a",
+        static_deps,
+        static_system_deps = ["m", "pthread"],
+        static_roots = ["_gfortrani_estr_write"],
+    )
+    @test has_static_realization(lp)
+    d = generate_toml_dict(lp)
+    @test d["static_path"] == "lib/libgfortran.a"
+    @test d["static_deps"] == ["libgcc_s", "CSL_jll.libquadmath"]
+    @test d["static_system_deps"] == ["m", "pthread"]
+    @test d["static_roots"] == ["_gfortrani_estr_write"]
+    @test parse_toml_dict(JLLLibraryProduct, d) == lp
+
+    # An empty roots list is still emitted, since the archive does exist
+    lp = JLLLibraryProduct(:libgfortran, "lib/libgfortran.so.5", [];
+                           static_path = "lib/libgfortran.a")
+    d = generate_toml_dict(lp)
+    @test d["static_roots"] == String[]
+    @test parse_toml_dict(JLLLibraryProduct, d) == lp
+
+    function make_csl_jll(products; deps = [])
+        return JLLInfo(;
+            name = "CompilerSupportLibraries",
+            version = v"1.0.5+1",
+            builds = [
+                JLLBuildInfo(;
+                    src_version = v"1.0.5+1",
+                    platform = Platform("x86_64", "linux"; libc = "glibc"),
+                    name = "CompilerSupportLibraries",
+                    artifact = JLLArtifactBinding(
+                        treehash = "0c6c284985577758b3a339c6215c9d4e3d71420e",
+                        download_sources = [],
+                    ),
+                    products,
+                    deps,
+                    licenses = [mit_license],
+                ),
+            ],
+        )
+    end
+
+    # Static dependency edges are held to the same coherence standard as dynamic ones
+    @test_throws ArgumentError make_csl_jll([
+        JLLLibraryProduct(:libgfortran, "lib/libgfortran.so.5", [];
+                          static_path = "lib/libgfortran.a",
+                          static_deps = [JLLLibraryDep(nothing, :libquadmath)]),
+    ])
+    @test_throws ArgumentError make_csl_jll([
+        JLLLibraryProduct(:libgfortran, "lib/libgfortran.so.5", [];
+                          static_path = "lib/libgfortran.a",
+                          static_deps = [JLLLibraryDep(:Zlib_jll, :libz)]),
+    ])
+
+    # A coherent JLL survives the full round-trip through `JLL.toml`, static and all
+    jll = make_csl_jll([
+        JLLLibraryProduct(:libquadmath, "lib/libquadmath.so.0", [];
+                          static_path = "lib/libquadmath.a"),
+        JLLLibraryProduct(:libgfortran, "lib/libgfortran.so.5", [];
+                          static_path = "lib/libgfortran.a",
+                          static_deps = [JLLLibraryDep(nothing, :libquadmath)],
+                          static_system_deps = ["m"],
+                          static_roots = ["_gfortrani_estr_write"]),
+    ])
+    d, new_jll = roundtrip_jll_through_toml(jll)
+    @test new_jll == jll
+    libgfortran = only([p for p in only(new_jll.builds).products if p.varname == :libgfortran])
+    @test libgfortran.static_path == "lib/libgfortran.a"
+    @test libgfortran.static_deps == [JLLLibraryDep(nothing, :libquadmath)]
+    @test libgfortran.static_system_deps == ["m"]
+    @test libgfortran.static_roots == ["_gfortrani_estr_write"]
+    # The static realization does not disturb the library identity machinery
+    @test libgfortran.dlid == JLLGenerator.uuid5(Base.UUID(new_jll), "libgfortran")
+end
+
 # Test that we can generate all of the stdlib JLLs in `contrib/`
 @testset "stdlib JLL generation" begin
     include(joinpath(dirname(@__DIR__), "contrib", "gen_julia_jlls.jl"))

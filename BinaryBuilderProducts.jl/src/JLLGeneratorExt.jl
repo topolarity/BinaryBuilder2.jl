@@ -8,7 +8,8 @@
 # directly in `BinaryBuilderProducts`.
 
 using BinaryBuilderProducts, JLLGenerator
-import BinaryBuilderProducts: AbstractProduct, ExecutableProduct, FileProduct, LibraryProduct
+import BinaryBuilderProducts: AbstractProduct, ExecutableProduct, FileProduct, LibraryProduct,
+                              StaticLibraryProduct
 import JLLGenerator: AbstractJLLProduct, JLLExecutableProduct, JLLFileProduct, JLLLibraryProduct, JLLLibraryDep, AbstractProducts
 
 # I feel this should be in Base Julia
@@ -47,12 +48,16 @@ function JLLLibraryDep(lp::LibraryProduct, jll::Union{Symbol,Nothing} = nothing)
 end
 
 function JLLLibraryProduct(lp::LibraryProduct, prefix::String; kwargs...)
+    # Note that this un-audited conversion can only fill in the location of the static
+    # archive; the dependency structure of both realizations is learned by the auditor.
+    static_path = lp.static === nothing ? nothing : locate(lp.static, prefix; kwargs...)
     return JLLLibraryProduct(
         lp.varname,
         locate(lp, prefix; kwargs...),
         [];
         flags = lp.dlopen_flags,
         on_load_callback = lp.on_load_callback,
+        static_path,
     )
 end
 function AbstractJLLProduct(lp::LibraryProduct, prefix::String; kwargs...)
@@ -130,12 +135,22 @@ function AbstractProduct(ld::JLLLibraryDep; artifact, artifacts, cache)
 end
 function AbstractProduct(lp::JLLLibraryProduct; artifact, artifacts, cache)
     return get!(cache, lp) do
-        # For each dep, look up the appropriate library product in our dependency
+        # Reconstruct the static realization, if there is one.  The dependency lists
+        # are given explicitly, as there is nothing left to inherit at this point.
+        static = nothing
+        if lp.static_path !== nothing
+            static = StaticLibraryProduct(
+                lp.static_path;
+                deps = String[generate_toml_dict(dep) for dep in lp.static_deps],
+                system_deps = copy(lp.static_system_deps),
+            )
+        end
         return LibraryProduct(
             lp.path,
             lp.varname;
-            deps = LibraryProduct[AbstractProduct(dep; artifact, artifacts, cache) for dep in lp.deps],
             dlopen_flags = lp.flags,
+            on_load_callback = lp.on_load_callback,
+            static,
         )
     end
 end

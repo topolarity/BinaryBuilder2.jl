@@ -7,7 +7,7 @@ import Base: UUID
 export JLLInfo, JLLBuildInfo, JLLSourceRecord, JLLArtifactSource, JLLLibraryDep,
        AbstractJLLProduct, JLLExecutableProduct, JLLFileProduct, JLLLibraryProduct,
        JLLPackageDependency, JLLArtifactBinding, AbstractProducts, JLLBuildLicense,
-       generate_jll, generate_toml_dict, parse_toml_dict
+       generate_jll, generate_toml_dict, parse_toml_dict, has_static_realization
 
 include("RTLD_flags.jl")
 include("PkgCompatHacks.jl")
@@ -111,17 +111,47 @@ end
     # filled in automatically when assembling a `JLLInfo` if left as `nothing`.
     dlid::Union{Nothing,UUID}
 
+    # A library can also have a static realization; when it does, `static_path` gives
+    # the artifact-relative path of the archive, and the remaining `static_*` fields
+    # describe what must be linked alongside it.  `static_deps` are edges onto other
+    # JLL libraries (exactly like `deps`), `static_system_deps` are bare system library
+    # names (e.g. `"m"`, `"pthread"`, without any `-l` prefix) that the system provides,
+    # and `static_roots` names symbols that must be kept alive when linking the archive
+    # (e.g. the constructors that would have run when loading the shared library).
+    static_path::Union{Nothing,String}
+    static_deps::Vector{JLLLibraryDep}
+    static_system_deps::Vector{String}
+    static_roots::Vector{String}
+
     function JLLLibraryProduct(varname, path, deps;
                                flags = rtld_symbols(default_rtld_flags),
                                soname = basename(path),
                                on_load_callback = nothing,
-                               dlid = nothing)
+                               dlid = nothing,
+                               static_path = nothing,
+                               static_deps = JLLLibraryDep[],
+                               static_system_deps = String[],
+                               static_roots = String[])
         if isa(flags, UInt32)
             flags = rtld_symbols(flags)
         end
-        return new(varname, path, deps, soname, flags, on_load_callback, dlid)
+        if static_path === nothing && (!isempty(static_deps) || !isempty(static_system_deps) || !isempty(static_roots))
+            throw(ArgumentError("Library product '$(varname)' declares static metadata without a `static_path`!"))
+        end
+        return new(varname, path, deps, soname, flags, on_load_callback, dlid,
+                   static_path === nothing ? nothing : String(static_path),
+                   empty_convert(JLLLibraryDep, static_deps),
+                   empty_convert(String, String[string(d) for d in static_system_deps]),
+                   empty_convert(String, String[string(r) for r in static_roots]))
     end
 end
+
+"""
+    has_static_realization(lp::JLLLibraryProduct)
+
+Returns `true` if this library product also ships a static archive.
+"""
+has_static_realization(lp::JLLLibraryProduct) = lp.static_path !== nothing
 
 function generate_toml_dict(lp::JLLLibraryProduct)
     d = Dict(
@@ -138,6 +168,14 @@ function generate_toml_dict(lp::JLLLibraryProduct)
     if lp.dlid !== nothing
         d["dlid"] = string(lp.dlid)
     end
+    # Static metadata is emitted only when there actually is a static realization,
+    # so that JLLs without one are byte-for-byte unchanged.
+    if lp.static_path !== nothing
+        d["static_path"] = lp.static_path
+        d["static_deps"] = generate_toml_dict.(lp.static_deps)
+        d["static_system_deps"] = lp.static_system_deps
+        d["static_roots"] = lp.static_roots
+    end
     return d
 end
 function parse_toml_dict(::Type{JLLLibraryProduct}, d)
@@ -149,6 +187,7 @@ function parse_toml_dict(::Type{JLLLibraryProduct}, d)
     if haskey(d, "dlid")
         dlid = UUID(d["dlid"])
     end
+    static_path = get(d, "static_path", nothing)
     return JLLLibraryProduct(
         Symbol(d["name"]),
         d["path"],
@@ -157,6 +196,10 @@ function parse_toml_dict(::Type{JLLLibraryProduct}, d)
         flags = Symbol.(d["flags"]),
         on_load_callback,
         dlid,
+        static_path,
+        static_deps = [parse_toml_dict(JLLLibraryDep, sd) for sd in get(d, "static_deps", String[])],
+        static_system_deps = String[string(sd) for sd in get(d, "static_system_deps", String[])],
+        static_roots = String[string(r) for r in get(d, "static_roots", String[])],
     )
 end
 
@@ -415,17 +458,21 @@ easier for non-BinaryBuilder2 users to make use of this package if needed.
         # Quick verification of dependency structure, to ensure we're not incoherent.
         for p in products
             if isa(p, JLLLibraryProduct)
-                for d in p.deps
+                # Static dependency edges are checked for coherence just like dynamic ones.
+                for (d, kind) in Iterators.flatten((
+                        ((d, "depends") for d in p.deps),
+                        ((d, "statically depends") for d in p.static_deps),
+                    ))
                     # A "nothing" module means it's an intra-package dependency
                     if d.mod === nothing
                         # Check to ensure we have another library product with that name:
                         if !any(op.varname == d.varname for op in products)
-                            throw(ArgumentError("Product '$(p.varname)' depends on '$(d.varname)' in the same JLL, but no such library product exists for platform '$(triplet(platform))'!"))
+                            throw(ArgumentError("Product '$(p.varname)' $(kind) on '$(d.varname)' in the same JLL, but no such library product exists for platform '$(triplet(platform))'!"))
                         end
                     else
                         # Check to ensure we've declared a dependency on `d.mod`
                         if d.mod ∉ [d.name for d in deps]
-                            throw(ArgumentError("Product '$(p.varname)' depends on '$(d.mod).$(d.varname)', but '$(d.mod)' is not in the top-level list of dependencies!"))
+                            throw(ArgumentError("Product '$(p.varname)' $(kind) on '$(d.mod).$(d.varname)', but '$(d.mod)' is not in the top-level list of dependencies!"))
                         end
                     end
                 end
@@ -540,7 +587,11 @@ function populate_dlids(build::JLLBuildInfo, pkg_uuid::UUID)
                                   soname = p.soname,
                                   flags = p.flags,
                                   on_load_callback = p.on_load_callback,
-                                  dlid = uuid5(pkg_uuid, string(p.varname)))
+                                  dlid = uuid5(pkg_uuid, string(p.varname)),
+                                  static_path = p.static_path,
+                                  static_deps = p.static_deps,
+                                  static_system_deps = p.static_system_deps,
+                                  static_roots = p.static_roots)
         end
         return p
     end
