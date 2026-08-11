@@ -111,8 +111,7 @@ for target_platform in (Platform("x86_64", "linux"), Platform("aarch64", "macos"
         pass_results = Dict{String,Vector{PassResult}}()
         ensure_sonames!(scan, pass_results)
         jll_lib_products = resolve_dynamic_links!(scan, pass_results, Dict{Symbol,Vector{JLLLibraryProduct}}())
-        jll_lib_products, standalone = resolve_static_libraries!(
-            scan, pass_results, jll_lib_products, Dict{Symbol,Vector{JLLLibraryProduct}}())
+        jll_lib_products, standalone = resolve_static_libraries!(scan, pass_results, jll_lib_products)
         by_varname = Dict(p.varname => p for p in jll_lib_products)
         return (; scan, pass_results, jll_lib_products, standalone, by_varname)
     end

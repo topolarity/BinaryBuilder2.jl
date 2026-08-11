@@ -4,7 +4,7 @@ using BinaryBuilderProducts: resolve_deps
 const static_pass_name = "resolve_static_libraries!"
 
 """
-    resolve_static_libraries!(scan, pass_results, jll_lib_products, dep_libs)
+    resolve_static_libraries!(scan, pass_results, jll_lib_products)
 
 Fill in the static realization of every audited library product, and audit any
 standalone static archives.
@@ -15,8 +15,7 @@ no dynamic sibling.
 """
 function resolve_static_libraries!(scan::ScanResult,
                                    pass_results::Dict{String,Vector{PassResult}},
-                                   jll_lib_products::Vector{JLLLibraryProduct},
-                                   dep_libs::Dict{Symbol,Vector{JLLLibraryProduct}})
+                                   jll_lib_products::Vector{JLLLibraryProduct})
     if isempty(scan.static_library_products)
         return (jll_lib_products, StaticLibraryInfo[])
     end
@@ -36,9 +35,6 @@ function resolve_static_libraries!(scan::ScanResult,
             end
         end
     end
-
-    # Map varname -> the dynamic library product we audited, for sibling lookups
-    products_by_varname = Dict{Symbol,JLLLibraryProduct}(p.varname => p for p in jll_lib_products)
 
     updated_products = JLLLibraryProduct[]
     for product in jll_lib_products
