@@ -172,6 +172,26 @@ function load_dep_jllinfos(config::ExtractConfig)
 end
 
 
+"""
+    dep_artifact_dir(meta, jll_info, platform)
+
+Locate the unpacked artifact of a dependency JLL within the universe's depot, or
+return `nothing` if it is not present.  Used by the static audit to read a
+dependency's actual binaries.
+"""
+function dep_artifact_dir(meta, jll_info::JLLInfo, platform::AbstractPlatform)
+    build = try
+        select_platform(jll_info, platform)
+    catch
+        return nothing
+    end
+    if build === nothing
+        return nothing
+    end
+    dir = joinpath(meta.universe.depot_path, "artifacts", bytes2hex(build.artifact.treehash))
+    return isdir(dir) ? dir : nothing
+end
+
 function BinaryBuilderAuditor.audit!(config::ExtractConfig, artifact_dir::String; verbose::Bool = AbstractBuildMeta(config).verbose, kwargs...)
     build_config = config.build.config
     meta = AbstractBuildMeta(config)
@@ -185,12 +205,20 @@ function BinaryBuilderAuditor.audit!(config::ExtractConfig, artifact_dir::String
         get_library_products(jart::JLLBuildInfo) = filter(x -> isa(x, JLLLibraryProduct), jart.products)
         get_library_products(jll::JLLInfo, platform::AbstractPlatform) = get_library_products(select_platform(jll, platform))
         dep_libs = Dict{Symbol, Vector{JLLLibraryProduct}}()
+        # Where each dependency's artifact is unpacked, so that the static audit can
+        # verify symbol coverage against the real files rather than taking edges on trust.
+        dep_artifact_dirs = Dict{Symbol, String}()
         for dep in dep_jll_infos
             dep_libs[Symbol(dep.name)] = get_library_products(dep, platform)
+            dep_dir = dep_artifact_dir(meta, dep, platform)
+            if dep_dir !== nothing
+                dep_artifact_dirs[Symbol(dep.name)] = dep_dir
+            end
         end
         # Get libraries for all inter-dependencies
         for (inter_dep_name, inter_dep) in config.inter_deps
             dep_libs[Symbol(inter_dep_name)] = inter_dep.audit_result.jll_lib_products
+            dep_artifact_dirs[Symbol(inter_dep_name)] = artifact_path(inter_dep)
         end
         return audit!(
             artifact_dir,
@@ -200,6 +228,7 @@ function BinaryBuilderAuditor.audit!(config::ExtractConfig, artifact_dir::String
             env = config.build.env,
             platform,
             static_library_products = StaticLibraryProduct[p for p in config.products if isa(p, StaticLibraryProduct)],
+            dep_artifact_dirs,
             kwargs...
         )
     end
