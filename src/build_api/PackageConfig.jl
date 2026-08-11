@@ -206,6 +206,17 @@ function JLLProducts(result::ExtractResult)
             continue
         end
 
+        # A standalone `StaticLibraryProduct` is audited, but has no dynamic
+        # realization to hang its metadata off of, and `JLL.toml` has no way to
+        # describe a library that exists only as an archive.
+        if isa(product, StaticLibraryProduct)
+            throw(ArgumentError("""
+                Standalone StaticLibraryProduct '$(product.varname)' cannot yet be packaged;
+                `JLL.toml` only describes static archives as the subordinate realization of a
+                `LibraryProduct`.  Declare it as `LibraryProduct(...; static=StaticLibraryProduct(...))`.
+                """))
+        end
+
         push!(products, 
             # Convert from ExecutableProduct/FileProduct to JLLProduct types
             AbstractJLLProduct(
